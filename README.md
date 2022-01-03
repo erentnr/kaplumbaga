@@ -2,6 +2,8 @@
 
 Kaplumbaga is a competitive fast-typing game which you can play with your friends.
 
+Play: [Kaplumbaga - Test your speed.](https://kaplumbaga.netlify.app/)
+
 ## Tech
 
 Flask, React, SocketIO
