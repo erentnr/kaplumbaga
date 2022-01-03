@@ -169,7 +169,7 @@ const App = () => {
 
   return (
     <div className="main">
-      {isConnected ? <Game /> : '<h2>No connection</h2>'}
+      {isConnected ? <Game /> : 'No connection'}
     </div>
   );
 };
