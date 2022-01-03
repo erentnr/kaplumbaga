@@ -1,0 +1,78 @@
+.main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
+}
+
+.game-container {
+  width:100%;
+  max-width: 800px;
+}
+
+.kaplumbaga-race {
+  background-color: #5D8AA6;
+  height:350px;
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  border-radius: 5px;
+  margin-bottom: 10px;
+}
+
+.kaplumbaga {
+  position: relative;
+  width: 60px;
+  height: auto;
+  transition: 2s;
+}
+
+.game-text {
+  font-size: 1.7em;
+  line-height: 1.5em;
+  font-weight: 400;
+  padding:10px;
+  user-select: none;
+}
+
+.game-text span span {
+  border-radius: 5px;
+  padding: 0 5px;
+}
+
+.game-text .current {
+  background-color: #D7D7D9;
+}
+
+.game-text .correct {
+  color: white;
+  background-color: #025b0e;
+}
+
+.game-text .wrong {
+  color: white;
+  background-color: #8C311C;
+}
+
+.game-input {
+  display: flex;
+  justify-content: center;
+}
+
+.game-input input {
+  width: 98%;
+  padding: 12px 20px;
+  margin: 8px 0;
+  display: inline-block;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+
+.start-button {
+  padding:5px;
+  margin:20px;
+  font-size: 20px;
+}
