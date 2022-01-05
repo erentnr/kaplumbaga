@@ -26,7 +26,7 @@
   position: relative;
   width: 60px;
   height: auto;
-  transition: 2s;
+  transition: 0.5s;
 }
 
 .game-text {
