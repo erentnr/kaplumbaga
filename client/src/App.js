@@ -5,7 +5,7 @@ import './App.css';
 
 import Game from "./components/Game"
 
-const endPoint = "http://localhost:5000";
+const endPoint = process.env.REACT_APP_SOCKET_SERVER;
 const socket = io.connect(`${endPoint}`);
 
 const App = () => {
