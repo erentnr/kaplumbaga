@@ -1,16 +1,11 @@
+import os
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
 
-from pathlib import Path
-import os
-import configparser
-
-BASE_DIR = Path(__file__).parent
-config = configparser.ConfigParser()
-config.read(os.path.join(BASE_DIR, "secrets.ini"))
+APP_SECRET = os.environ.get('SECRET_KEY', None)
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = config['flask']['secret_key']
+app.config['SECRET_KEY'] = APP_SECRET
 socketio = SocketIO(app, cors_allowed_origins='*')
 
 SAMPLE_TEXT = ("Artık bir satranç oynuyorduk, satrançta da en işe yaramaz "
