@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from "react";
 import io from "socket.io-client";
+import { Routes, Route } from "react-router-dom";
 
 import './App.css';
 
-import Game from "./components/Game"
+import { Home, Game } from "./components"
 
 const endPoint = process.env.REACT_APP_SOCKET_SERVER;
 const socket = io.connect(`${endPoint}`);
@@ -24,11 +25,10 @@ const App = () => {
 
   if (isConnected){
     return (
-      <div className="main">
-        <Game
-          socket={socket}
-        />
-      </div>
+      <Routes>
+        <Route path="/" element={ <Home socket={socket} /> } />
+        <Route path="/play/:room_id" element={ <Game socket={socket} /> } />
+      </Routes>
     )
   } else {
     return (
