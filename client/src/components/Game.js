@@ -1,20 +1,57 @@
 import { useState, useEffect, useRef } from "react";
+import { useParams } from "react-router-dom";
+
+import '../Game.css';
 
 import TurtleSvg from '../assets/turtle.svg';
 
 const Game = ({socket}) => {
+  const [competitors, setCompetitors] = useState({});
   const [randomText, setRandomText] = useState('');
   const [wordArr, setWordArr] = useState([]);
   const [userInput, setUserInput] = useState('');
   const [current, setCurrent] = useState(0);
   const [totalProgress, setTotalProgress] = useState(0);
-  const [kaplumbagaPos, setKaplumbagaPos] = useState(0);
   const [isFinished, setIsFinished] = useState(false);
+
   const raceArea = useRef();
 
+  const params = useParams();
+  const roomID = params.room_id;
+  const userID = socket.id;
+
+  const username = localStorage.getItem("username");
+
   useEffect(() => {
+    if (!isFinished){
+      setCurrent(0)
+      setTotalProgress(0)
+      for (let competitor in competitors){
+        setCompetitors(
+          prev=> ({
+            ...prev,
+            [competitor]:{
+              ...prev.competitor,
+              progress:0,
+              position:0,
+            }
+          })
+        )
+      }
+    }
+  }, [isFinished])
+
+  useEffect(() => {
+    // join to server
+    socket.emit('join', {room_id:roomID, sid:userID, username:username})
+    // listen for join response
+    socket.on('join_room', (data) => {
+      setCompetitors(data)
+    })
     // get the random text sent from server
     socket.on('load_text', (text) => {
+      // set all states to inital value on game start
+      setIsFinished(false)
       // create array of word objects to keep status of words
       const textArr = text.split(" ")
       for (let i=0; textArr.length > i; i++){
@@ -30,10 +67,21 @@ const Game = ({socket}) => {
       setRandomText(text)
     })
     // get current progress of user
-    socket.on('progress_percentage', (progress) => {
+    socket.on('progress_percentage', (data) => {
       // change kamplumbaga position according to the progress
-      let raceAreaWidth = raceArea.current.getBoundingClientRect().width
-      setKaplumbagaPos(((raceAreaWidth - 60) / 100) * progress);
+      let raceAreaWidth = raceArea.current.getBoundingClientRect().width;
+      let position = ((raceAreaWidth - 60) / 100) * data.progress;
+      setCompetitors(
+        prev=> ({
+          ...prev,
+          [data.user_id]:{
+            ...prev.user_id,
+            progress:data.progress,
+            position:position,
+            username:data.username
+          }
+        })
+      )
     })
     socket.on('finish_game', () => {
       setIsFinished(true)
@@ -64,22 +112,17 @@ const Game = ({socket}) => {
         // send finish message to server if user reaches end of text
         // else, send progress
         if (currentProgress === 100) {
-          socket.emit('finish')
+          socket.emit('finish', {room_id:roomID})
         } else {
-          socket.emit('progress', currentProgress)
+          socket.emit('progress', {room_id:roomID, progress:currentProgress, username:username})
         }
       }
     }
   }, [userInput, randomText]);
 
   const handleStart = () => {
-    // set all states to inital value on game start
-    setCurrent(0)
-    setTotalProgress(0)
-    setKaplumbagaPos(0)
-    setIsFinished(false)
     // send game_start message to server
-    socket.emit('game_start')
+    socket.emit('game_start', {room_id:roomID})
   }
 
   const handleChange = (event) => {
@@ -110,16 +153,27 @@ const Game = ({socket}) => {
       }
     }
   }
+
   return (
     <div className="main">
       <div className="game-container">
         <div ref={raceArea} className="kaplumbaga-race">
-          <img
-            style={{left:kaplumbagaPos || 0}}
-            className="kaplumbaga"
-            src={TurtleSvg}
-            alt="kaplumbaga"
-          />
+          {Object.keys(competitors).map((competitor)=>{
+            return (
+              <div
+                className="kaplumbaga-wrapper"
+                key={competitor}
+                style={{left:competitors[competitor].position || 0}}
+              >
+                <p>{competitors[competitor].username}</p>
+                <img
+                  className="kaplumbaga"
+                  src={TurtleSvg}
+                  alt="kaplumbaga"
+                />
+              </div>
+            )
+          })}
         </div>
         <div className="game-text default">
           {wordArr.map((item, index) => {
