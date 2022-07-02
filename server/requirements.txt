@@ -1,7 +1,7 @@
 bidict==0.21.4
 click==8.0.3
 dnspython==1.16.0
-eventlet==0.33.1
+eventlet==0.30.2
 Flask==2.1.2
 Flask-SocketIO==5.2.0
 greenlet==1.1.2
