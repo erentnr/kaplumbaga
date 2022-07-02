@@ -3,8 +3,23 @@ import { useNavigate } from "react-router-dom";
 
 import TurtleSvg from '../assets/turtle.svg';
 
+import Modal from './Modal'
+
 const Home = ({socket}) => {
   const [roomID, setRoomID] = useState('');
+  const [showModal, setShowModal] = useState(false);
+  const [username, setUsername] = useState('');
+
+  useEffect(() => {
+    let usernameOnLS = localStorage.getItem("username")
+    if (!usernameOnLS) {
+      let randomUsername = `player${~~(Math.random()*1000)}`
+      localStorage.setItem("username", randomUsername)
+      setUsername(randomUsername)
+    } else {
+      setUsername(usernameOnLS)
+    }
+  }, [showModal]);
 
   let navigate = useNavigate();
 
@@ -22,10 +37,15 @@ const Home = ({socket}) => {
     setRoomID(event.target.value)
   }
 
+  const handleNewUsername = () => {
+    setShowModal(true)
+  }
+
   return (
     <div className="main">
+      <Modal showModal={showModal} setShowModal={setShowModal} />
       <div className="home-header">
-       <img className="kaplumbaga" src={TurtleSvg} />
+       <img className="kaplumbaga" alt="" src={TurtleSvg} />
        <div className="header-title">
          <h2>Kaplumbaga</h2>
          <p>Test your speed, play with your friends!</p>
@@ -44,7 +64,18 @@ const Home = ({socket}) => {
           type="button"
           value="Join Game"
           onClick={handleJoin}
+          disabled={!roomID}
         />
+        <div className="username-wrapper">
+         <p>Joining as {username}. 
+          <span
+            className="change-username"
+            onClick={handleNewUsername}
+          >
+            Change
+          </span>
+        </p>
+        </div>
         <h2>or</h2>
         <input
           className="kaplumbaga-button"

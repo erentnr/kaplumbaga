@@ -28,10 +28,11 @@ def handle_disconnect():
 def handle_join(data):
     user_id = request.sid
     room = data['room_id']
+    username = data['username']
     join_room(room)
     if room not in ROOM_LIST:
         ROOM_LIST[room] = {}
-    ROOM_LIST[room][user_id] = {"progress":0}
+    ROOM_LIST[room][user_id] = {"progress":0, 'username':username}
     emit('join_room', ROOM_LIST[room], to=room)
 
 @socketio.on('leave')
@@ -53,8 +54,11 @@ def handle_progress(data):
     user_id = request.sid
     progress = data['progress']
     room = data['room_id']
+    username = data['username']
     ROOM_LIST[room][user_id]['progress'] = progress
-    emit('progress_percentage', {'user_id':user_id, 'progress':progress}, to=room)
+    emit('progress_percentage', 
+        {'user_id':user_id, 'progress':progress, 'username':username },
+        to=room)
 
 @socketio.on('finish')
 def handle_progress(data):

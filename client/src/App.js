@@ -3,6 +3,7 @@ import io from "socket.io-client";
 import { Routes, Route } from "react-router-dom";
 
 import './App.css';
+import './Modal.css';
 
 import { Home, Game } from "./components"
 

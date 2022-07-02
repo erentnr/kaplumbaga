@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams } from "react-router-dom";
 
+import '../Game.css';
+
 import TurtleSvg from '../assets/turtle.svg';
 
 const Game = ({socket}) => {
@@ -17,6 +19,8 @@ const Game = ({socket}) => {
   const params = useParams();
   const roomID = params.room_id;
   const userID = socket.id;
+
+  const username = localStorage.getItem("username");
 
   useEffect(() => {
     if (!isFinished){
@@ -39,7 +43,7 @@ const Game = ({socket}) => {
 
   useEffect(() => {
     // join to server
-    socket.emit('join', {room_id:roomID, sid:userID})
+    socket.emit('join', {room_id:roomID, sid:userID, username:username})
     // listen for join response
     socket.on('join_room', (data) => {
       setCompetitors(data)
@@ -74,6 +78,7 @@ const Game = ({socket}) => {
             ...prev.user_id,
             progress:data.progress,
             position:position,
+            username:data.username
           }
         })
       )
@@ -109,7 +114,7 @@ const Game = ({socket}) => {
         if (currentProgress === 100) {
           socket.emit('finish', {room_id:roomID})
         } else {
-          socket.emit('progress', {room_id:roomID, progress:currentProgress})
+          socket.emit('progress', {room_id:roomID, progress:currentProgress, username:username})
         }
       }
     }
@@ -160,7 +165,7 @@ const Game = ({socket}) => {
                 key={competitor}
                 style={{left:competitors[competitor].position || 0}}
               >
-                <p>{competitor.slice(0, 5)}</p>
+                <p>{competitors[competitor].username}</p>
                 <img
                   className="kaplumbaga"
                   src={TurtleSvg}
