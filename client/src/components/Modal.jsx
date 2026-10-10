@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
 const Modal = (props) => {
   const [newUsername, setNewUsername] = useState('');
@@ -8,8 +8,7 @@ const Modal = (props) => {
   }
 
   const handleClick = () => {
-    localStorage.setItem("username", newUsername)
-    props.setShowModal(false)
+    props.onSave(newUsername.trim())
   }
 
   return (
@@ -26,6 +25,7 @@ const Modal = (props) => {
           className="username-input"
           placeholder="Username..."
           value={newUsername}
+          maxLength={24}
           onChange={handleChange}
         />
         <input
@@ -33,7 +33,7 @@ const Modal = (props) => {
           type="button"
           value="Save"
           onClick={handleClick}
-          disabled={!newUsername}
+          disabled={!newUsername.trim()}
         />
       </div>
     </div>

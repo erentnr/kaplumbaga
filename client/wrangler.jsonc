@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "kaplumbaga",
+  "compatibility_date": "2026-10-10",
+  // static assets only, no Worker script: requests are free and unlimited
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+  "routes": [
+    { "pattern": "kaplumbaga.eren.sh", "custom_domain": true }
+  ]
+}

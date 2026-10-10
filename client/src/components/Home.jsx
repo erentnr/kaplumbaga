@@ -1,36 +1,27 @@
-import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState } from "react";
+import { useNavigate } from "react-router";
 
 import TurtleSvg from '../assets/turtle.svg';
 
 import Modal from './Modal'
+import { getUsername } from '../username'
+import { randomRoomCode } from '../random'
 
-const Home = ({socket}) => {
+const Home = () => {
   const [roomID, setRoomID] = useState('');
   const [showModal, setShowModal] = useState(false);
-  const [username, setUsername] = useState('');
-
-  useEffect(() => {
-    let usernameOnLS = localStorage.getItem("username")
-    if (!usernameOnLS) {
-      let randomUsername = `player${~~(Math.random()*1000)}`
-      localStorage.setItem("username", randomUsername)
-      setUsername(randomUsername)
-    } else {
-      setUsername(usernameOnLS)
-    }
-  }, [showModal]);
+  const [username, setUsername] = useState(getUsername);
 
   let navigate = useNavigate();
 
   const handleCreate = () => {
-    const randomRoomID = Math.random().toString(36).substr(2, 5)
-    navigate(`/play/${randomRoomID}`)
+    navigate(`/play/${randomRoomCode()}`)
   }
 
   const handleJoin = () => {
-    if (!roomID) return
-    navigate(`/play/${roomID}`)
+    const code = roomID.trim()
+    if (!code) return
+    navigate(`/play/${encodeURIComponent(code)}`)
   }
 
   const handleChange = (event) => {
@@ -41,9 +32,15 @@ const Home = ({socket}) => {
     setShowModal(true)
   }
 
+  const handleSaveUsername = (newUsername) => {
+    localStorage.setItem("username", newUsername)
+    setUsername(newUsername)
+    setShowModal(false)
+  }
+
   return (
     <div className="main">
-      <Modal showModal={showModal} setShowModal={setShowModal} />
+      <Modal showModal={showModal} onSave={handleSaveUsername} />
       <div className="home-header">
        <img className="kaplumbaga" alt="" src={TurtleSvg} />
        <div className="header-title">
@@ -64,7 +61,7 @@ const Home = ({socket}) => {
           type="button"
           value="Join Game"
           onClick={handleJoin}
-          disabled={!roomID}
+          disabled={!roomID.trim()}
         />
         <div className="username-wrapper">
          <p>Joining as {username}. 

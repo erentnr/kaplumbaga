@@ -4,6 +4,7 @@
 }
 
 .kaplumbaga-race {
+  position: relative;
   background-color: #5D8AA6;
   height:350px;
   display: flex;
@@ -66,8 +67,35 @@
   box-sizing: border-box;
 }
 
+.countdown {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 6em;
+  font-weight: 900;
+  pointer-events: none;
+}
+
+.game-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 20px;
+}
+
+.language-select {
+  padding: 5px;
+  font-size: 18px;
+}
+
 .start-button {
   padding:5px;
-  margin:20px;
   font-size: 20px;
+}
+
+.game-message {
+  margin: 0;
 }
