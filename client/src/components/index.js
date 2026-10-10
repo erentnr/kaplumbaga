@@ -1,2 +1,2 @@
-export { default as Home } from "../components/Home";
-export { default as Game } from "../components/Game";
+export { default as Home } from "./Home";
+export { default as Game } from "./Game";

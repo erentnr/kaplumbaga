@@ -1,0 +1,32 @@
+# Game server for the VPS. Nothing is published on the host: cloudflared opens
+# an outbound tunnel and Cloudflare routes kaplumbaga-api.eren.sh to server:8000.
+#
+#   cp .env-sample .env   # paste the tunnel token
+#   docker compose up -d --build
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  server:
+    build: ./server
+    restart: unless-stopped
+    environment:
+      CORS_ORIGINS: https://kaplumbaga.eren.sh
+      # client IP for the rate limits, set by Cloudflare
+      TRUSTED_IP_HEADER: CF-Connecting-IP
+    logging: *logging
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.0
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+    depends_on:
+      server:
+        condition: service_healthy
+    logging: *logging
