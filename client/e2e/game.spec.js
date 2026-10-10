@@ -185,6 +185,14 @@ test('every language can be raced', async ({ browser }) => {
   expect(alice.errors).toEqual([])
 })
 
+test('create game opens a new room with a readable code', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText(/^Joining as player\d+\./)).toBeVisible()
+  await page.click('input[value="Create Game"]')
+  await page.waitForURL(/\/play\/[a-km-np-z2-9]{5}$/)
+  await expect(turtles(page)).toHaveCount(1)
+})
+
 test('invalid room code shows an error', async ({ page }) => {
   await page.goto(`/play/${encodeURIComponent('bad room!')}`)
   await expect(message(page)).toHaveText('invalid room id')

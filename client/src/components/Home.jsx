@@ -5,6 +5,7 @@ import TurtleSvg from '../assets/turtle.svg';
 
 import Modal from './Modal'
 import { getUsername } from '../username'
+import { randomRoomCode } from '../random'
 
 const Home = () => {
   const [roomID, setRoomID] = useState('');
@@ -14,8 +15,7 @@ const Home = () => {
   let navigate = useNavigate();
 
   const handleCreate = () => {
-    const randomRoomID = Math.random().toString(36).slice(2, 7)
-    navigate(`/play/${randomRoomID}`)
+    navigate(`/play/${randomRoomCode()}`)
   }
 
   const handleJoin = () => {
