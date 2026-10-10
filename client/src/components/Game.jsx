@@ -11,6 +11,7 @@ const Game = ({socket}) => {
   const [competitors, setCompetitors] = useState({});
   const [status, setStatus] = useState('waiting');
   const [winner, setWinner] = useState(null);
+  const [winnerID, setWinnerID] = useState(null);
   const [joinError, setJoinError] = useState('');
   const [randomText, setRandomText] = useState('');
   const [current, setCurrent] = useState(0);
@@ -22,9 +23,10 @@ const Game = ({socket}) => {
   const inputRef = useRef(null);
 
   const params = useParams();
-  const roomID = params.room_id;
+  // room codes are lowercase, phone keyboards like to capitalize them
+  const roomID = params.room_id.toLowerCase();
 
-  const username = getUsername();
+  const [username] = useState(getUsername);
 
   const words = randomText ? randomText.split(" ") : [];
 
@@ -34,6 +36,7 @@ const Game = ({socket}) => {
       setCompetitors(state.players)
       setStatus(state.status)
       setWinner(state.winner)
+      setWinnerID(state.winner_id)
       setLanguage(state.language)
       if (state.status === 'countdown') {
         // a new race is about to start, clear the previous one
@@ -52,6 +55,7 @@ const Game = ({socket}) => {
       setCurrent(0)
       setUserInput('')
       setWinner(null)
+      setWinnerID(null)
       setStatus('playing')
     }
     // get current progress of a competitor
@@ -69,6 +73,7 @@ const Game = ({socket}) => {
     const onFinish = (data) => {
       setStatus('finished')
       setWinner(data.winner)
+      setWinnerID(data.winner_id)
     }
 
     socket.on('room_update', onRoomUpdate)
@@ -76,12 +81,25 @@ const Game = ({socket}) => {
     socket.on('progress_percentage', onProgress)
     socket.on('finish_game', onFinish)
     // join after the listeners are registered so the first room_update isn't missed
-    // language is only used if this join creates the room
-    socket.emit('join', {room_id: roomID, username: username, language: getPreferredLanguage()}, (response) => {
-      if (!response?.ok) setJoinError(response?.error || 'Could not join the room')
-    })
+    let active = true
+    let retryTimer
+    const join = () => {
+      // language is only used if this join creates the room
+      socket.emit('join', {room_id: roomID, username: username, language: getPreferredLanguage()}, (response) => {
+        if (!active || response?.ok) return
+        if (response?.error === 'too many requests') {
+          // rate limited, try again in a moment instead of giving up
+          retryTimer = setTimeout(join, 2000)
+        } else {
+          setJoinError(response?.error || 'Could not join the room')
+        }
+      })
+    }
+    join()
 
     return () => {
+      active = false
+      clearTimeout(retryTimer)
       // a disconnected socket already left the room on the server
       if (socket.connected) socket.emit('leave')
       socket.off('room_update', onRoomUpdate)
@@ -156,8 +174,11 @@ const Game = ({socket}) => {
   let message
   if (joinError) {
     message = joinError
+  } else if (status === 'finished' && !winner) {
+    message = 'Race over, nobody finished.'
   } else if (status === 'finished') {
-    message = `${winner} won!`
+    // the id tells apart players with the same name
+    message = winnerID === socket.id ? 'You won!' : `${winner} won!`
   } else if (status === 'countdown') {
     message = 'Get ready!'
   } else if (status === 'playing' && !randomText) {
@@ -176,18 +197,21 @@ const Game = ({socket}) => {
             <div className="countdown">{secondsLeft > 0 ? secondsLeft : 'Go!'}</div>
           )}
           {Object.entries(competitors).map(([competitorID, competitor]) => {
+            // move kaplumbaga and name with the progress: left edge on the
+            // start line at 0%, right edge on the finish line at 100%
+            const progress = competitor.progress || 0
+            const position = {left: `${progress}%`, transform: `translateX(-${progress}%)`}
             return (
               <div
-                className="kaplumbaga-wrapper"
+                className={competitorID === socket.id ? "kaplumbaga-wrapper me" : "kaplumbaga-wrapper"}
                 key={competitorID}
-                // move kaplumbaga according to the progress, 60px is its width
-                style={{left: `calc((100% - 60px) * ${(competitor.progress || 0) / 100})`}}
               >
-                <p>{competitor.username}</p>
+                <p style={position}>{competitor.username}</p>
                 <img
                   className="kaplumbaga"
                   src={TurtleSvg}
                   alt="kaplumbaga"
+                  style={position}
                 />
               </div>
             )

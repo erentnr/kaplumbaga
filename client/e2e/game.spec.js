@@ -1,9 +1,9 @@
-import { test, expect } from '@playwright/test'
+import { test as base, expect } from '@playwright/test'
 
 const newRoom = () => `e2e${Math.random().toString(36).slice(2, 8)}`
 
 // a player in their own browser context, like a separate device
-async function joinAs(browser, name, room, { viaHome = false, language } = {}) {
+async function openPlayer(browser, name, room, { viaHome = false, language } = {}) {
   const context = await browser.newContext()
   await context.addInitScript(([username, lang]) => {
     try {
@@ -35,14 +35,40 @@ async function joinAs(browser, name, room, { viaHome = false, language } = {}) {
   return { page, context, errors, requests, websockets }
 }
 
+const test = base.extend({
+  // opens players, and closes their browser contexts after the test so
+  // sockets don't pile up against the per-client connection limit
+  // (Playwright calls the second argument `use`, oxlint would take it for a React hook)
+  joinAs: async ({ browser }, provide) => {
+    const contexts = []
+    await provide(async (name, room, options) => {
+      const player = await openPlayer(browser, name, room, options)
+      contexts.push(player.context)
+      return player
+    })
+    await Promise.all(contexts.map((context) => context.close()))
+  },
+})
+
 const turtles = (page) => page.locator('.kaplumbaga-wrapper p')
 const words = (page) => page.locator('.game-text > span > span')
 const message = (page) => page.locator('.game-message')
 const input = (page) => page.locator('.game-input input')
 const startButton = (page) => page.locator('.start-button')
 const languageSelect = (page) => page.locator('.language-select')
-const turtleLeft = (page, name) => page.locator('.kaplumbaga-wrapper', { hasText: name })
-  .evaluate((el) => parseFloat(getComputedStyle(el).left))
+// distance of a turtle from the start line, and the room left to the finish line
+const turtleOffsets = (page, name) => page.locator('.kaplumbaga-wrapper', { hasText: name })
+  .evaluate((lane) => {
+    const track = lane.closest('.kaplumbaga-race').getBoundingClientRect()
+    const turtle = lane.querySelector('.kaplumbaga').getBoundingClientRect()
+    const label = lane.querySelector('p').getBoundingClientRect()
+    return {
+      fromStart: Math.round(turtle.left - track.left),
+      toFinish: Math.round(track.right - turtle.right),
+      labelToFinish: Math.round(track.right - label.right),
+    }
+  })
+const turtleLeft = async (page, name) => (await turtleOffsets(page, name)).fromStart
 
 async function typeWholeText(page) {
   const all = await words(page).allTextContents()
@@ -51,12 +77,14 @@ async function typeWholeText(page) {
   }
 }
 
-test('players race with a countdown, rematch, late joiners and leaving', async ({ browser }) => {
+test('players race with a countdown, rematch, late joiners and leaving', async ({ joinAs }) => {
   const room = newRoom()
-  const alice = await joinAs(browser, 'alice', room)
-  const bob = await joinAs(browser, 'bob', room, { viaHome: true })
+  const alice = await joinAs('alice', room)
+  const bob = await joinAs('bob', room, { viaHome: true })
 
   await expect(turtles(alice.page)).toHaveText(['alice', 'bob'])
+  // your own turtle is marked
+  await expect(alice.page.locator('.kaplumbaga-wrapper.me')).toHaveText('alice')
   await expect(message(alice.page)).toContainText(`Room code: ${room}`)
 
   // --- race 1: countdown, then the text
@@ -86,11 +114,10 @@ test('players race with a countdown, rematch, late joiners and leaving', async (
 
   await typeWholeText(alice.page)
   await expect(message(bob.page)).toHaveText('alice won!')
-  await expect(message(alice.page)).toHaveText('alice won!')
+  await expect(message(alice.page)).toHaveText('You won!')
   await expect(words(alice.page)).toHaveCount(wordCount)
   await expect(input(bob.page)).toBeDisabled()
-  const raceWidth = await alice.page.locator('.kaplumbaga-race').evaluate((el) => el.clientWidth)
-  await expect.poll(() => turtleLeft(bob.page, 'alice')).toBeCloseTo(raceWidth - 60, 0)
+  await expect.poll(async () => (await turtleOffsets(bob.page, 'alice')).toFinish).toBe(0)
 
   // --- race 2: fresh text, names kept, turtles back at the start
   await startButton(bob.page).click()
@@ -100,7 +127,7 @@ test('players race with a countdown, rematch, late joiners and leaving', async (
   await expect(turtles(alice.page)).toHaveText(['alice', 'bob'])
   await expect.poll(() => turtleLeft(alice.page, 'alice')).toBe(0)
 
-  const carol = await joinAs(browser, 'carol', room)
+  const carol = await joinAs('carol', room)
   await expect(message(carol.page)).toHaveText('Race in progress, you can join the next one.')
   await expect(startButton(carol.page)).toBeDisabled()
   await expect(turtles(alice.page)).toHaveText(['alice', 'bob', 'carol'])
@@ -126,8 +153,8 @@ test('players race with a countdown, rematch, late joiners and leaving', async (
   expect([...alice.errors, ...bob.errors]).toEqual([])
 })
 
-test('connects with a websocket and loads nothing from third parties', async ({ browser }) => {
-  const alice = await joinAs(browser, 'alice', newRoom())
+test('connects with a websocket and loads nothing from third parties', async ({ joinAs }) => {
+  const alice = await joinAs('alice', newRoom())
   await expect(turtles(alice.page)).toHaveText(['alice'])
   // the font is bundled, the server is the only other host
   expect(alice.requests.length).toBeGreaterThan(0)
@@ -139,10 +166,10 @@ test('connects with a websocket and loads nothing from third parties', async ({ 
   expect(alice.errors).toEqual([])
 })
 
-test('language picker changes the text for everyone in the room', async ({ browser }) => {
+test('language picker changes the text for everyone in the room', async ({ joinAs }) => {
   const room = newRoom()
-  const alice = await joinAs(browser, 'alice', room, { language: 'tr' })
-  const bob = await joinAs(browser, 'bob', room, { language: 'fr' })
+  const alice = await joinAs('alice', room, { language: 'tr' })
+  const bob = await joinAs('bob', room, { language: 'fr' })
 
   // the room keeps its creator's language
   await expect(languageSelect(bob.page)).toHaveValue('tr')
@@ -167,9 +194,9 @@ test('language picker changes the text for everyone in the room', async ({ brows
   expect([...alice.errors, ...bob.errors]).toEqual([])
 })
 
-test('every language can be raced', async ({ browser }) => {
+test('every language can be raced', async ({ joinAs }) => {
   const room = newRoom()
-  const alice = await joinAs(browser, 'alice', room)
+  const alice = await joinAs('alice', room)
   const options = await languageSelect(alice.page).locator('option').evaluateAll(
     (els) => els.map((el) => el.value))
   expect(options).toEqual(['tr', 'en', 'pt', 'de', 'fr', 'es'])
@@ -180,9 +207,44 @@ test('every language can be raced', async ({ browser }) => {
     await startButton(alice.page).click()
     await expect(input(alice.page)).toBeFocused()
     await typeWholeText(alice.page)
-    await expect(message(alice.page)).toHaveText('alice won!')
+    await expect(message(alice.page)).toHaveText('You won!')
   }
   expect(alice.errors).toEqual([])
+})
+
+test('a long name keeps the turtle inside the track', async ({ joinAs }) => {
+  const longName = 'Wolfeschlegelsteinhausen'
+  const racer = await joinAs(longName, newRoom())
+  await startButton(racer.page).click()
+  await expect(words(racer.page).first()).toBeVisible()
+  await typeWholeText(racer.page)
+  await expect(message(racer.page)).toHaveText('You won!')
+  await expect.poll(async () => (await turtleOffsets(racer.page, longName)).toFinish).toBe(0)
+  expect((await turtleOffsets(racer.page, longName)).labelToFinish).toBeGreaterThanOrEqual(0)
+})
+
+test('room codes ignore case and a pasted invite link works', async ({ joinAs, baseURL }) => {
+  const room = newRoom()
+  const alice = await joinAs('alice', room)
+  // a phone keyboard capitalized the code
+  const bob = await joinAs('bob', room.toUpperCase())
+  await expect(turtles(alice.page)).toHaveText(['alice', 'bob'])
+  await expect(message(bob.page)).toContainText(`Room code: ${room}`)
+
+  const carol = await joinAs('carol', newRoom())
+  await carol.page.goto('/')
+  await carol.page.fill('.room-code-input', ` ${baseURL}/play/${room} `)
+  await carol.page.press('.room-code-input', 'Enter')
+  await carol.page.waitForURL(`**/play/${room}`)
+  await expect(turtles(alice.page)).toHaveText(['alice', 'bob', 'carol'])
+})
+
+test('unknown addresses go to the home page', async ({ page }) => {
+  for (const path of ['/foo', '/play/', '/play']) {
+    await page.goto(path)
+    await expect(page.locator('.room-code-input')).toBeVisible()
+    expect(new URL(page.url()).pathname).toBe('/')
+  }
 })
 
 test('create game opens a new room with a readable code', async ({ page }) => {

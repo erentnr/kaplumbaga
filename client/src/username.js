@@ -9,3 +9,7 @@ export const getUsername = () => {
   }
   return username
 }
+
+export const saveUsername = (username) => {
+  localStorage.setItem("username", username)
+}

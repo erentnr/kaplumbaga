@@ -4,8 +4,15 @@ import { useNavigate } from "react-router";
 import TurtleSvg from '../assets/turtle.svg';
 
 import Modal from './Modal'
-import { getUsername } from '../username'
+import { getUsername, saveUsername } from '../username'
 import { randomRoomCode } from '../random'
+
+// accepts a room code or a whole invite link, codes are lowercase
+const roomCodeFrom = (text) => {
+  const value = text.trim()
+  const link = value.match(/\/play\/([^/?#\s]+)/)
+  return (link ? link[1] : value).toLowerCase()
+}
 
 const Home = () => {
   const [roomID, setRoomID] = useState('');
@@ -19,7 +26,7 @@ const Home = () => {
   }
 
   const handleJoin = () => {
-    const code = roomID.trim()
+    const code = roomCodeFrom(roomID)
     if (!code) return
     navigate(`/play/${encodeURIComponent(code)}`)
   }
@@ -33,7 +40,7 @@ const Home = () => {
   }
 
   const handleSaveUsername = (newUsername) => {
-    localStorage.setItem("username", newUsername)
+    saveUsername(newUsername)
     setUsername(newUsername)
     setShowModal(false)
   }
@@ -55,13 +62,18 @@ const Home = () => {
           placeholder="Room Code..."
           value={roomID}
           onChange={handleChange}
+          onKeyDown={(event) => event.key === 'Enter' && handleJoin()}
+          autoCapitalize="none"
+          autoComplete="off"
+          autoCorrect="off"
+          spellCheck={false}
         />
         <input
           className="kaplumbaga-button"
           type="button"
           value="Join Game"
           onClick={handleJoin}
-          disabled={!roomID.trim()}
+          disabled={!roomCodeFrom(roomID)}
         />
         <div className="username-wrapper">
          <p>Joining as {username}. 

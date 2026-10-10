@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { io } from "socket.io-client";
-import { Routes, Route } from "react-router";
+import { Routes, Route, Navigate } from "react-router";
 
 import './App.css';
 import './Modal.css';
@@ -16,17 +16,31 @@ const App = () => {
   const [connectionFailed, setConnectionFailed] = useState(false);
 
   useEffect(() => {
+    let retryTimer;
+    // socket.io-client retries network errors by itself, but not a connection
+    // the server refused or closed, so try again after a pause
+    const retryLater = () => {
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(() => socket.connect(), 5000);
+    };
     const onConnect = () => {
       setIsConnected(true);
       setConnectionFailed(false);
     };
-    const onDisconnect = () => setIsConnected(false);
-    const onConnectError = () => setConnectionFailed(true);
+    const onDisconnect = (reason) => {
+      setIsConnected(false);
+      if (reason === 'io server disconnect') retryLater();
+    };
+    const onConnectError = () => {
+      setConnectionFailed(true);
+      if (!socket.active) retryLater();
+    };
 
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('connect_error', onConnectError);
     return () => {
+      clearTimeout(retryTimer);
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
       socket.off('connect_error', onConnectError);
@@ -38,6 +52,7 @@ const App = () => {
       <Routes>
         <Route path="/" element={ <Home /> } />
         <Route path="/play/:room_id" element={ <Game socket={socket} /> } />
+        <Route path="*" element={ <Navigate to="/" replace /> } />
       </Routes>
     )
   } else {

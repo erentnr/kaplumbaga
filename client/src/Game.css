@@ -15,9 +15,33 @@
   margin-bottom: 10px;
 }
 
+/* one lane per player, the name and the turtle move inside it */
 .kaplumbaga-wrapper {
+  width: 100%;
+}
+
+.kaplumbaga-wrapper p,
+.kaplumbaga-wrapper .kaplumbaga {
   position: relative;
-  transition: 0.5s;
+  display: block;
+  transition: left 0.5s, transform 0.5s;
+}
+
+.kaplumbaga-wrapper p {
+  width: fit-content;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kaplumbaga-wrapper.me p {
+  font-weight: 800;
+}
+
+.kaplumbaga-wrapper.me p::after {
+  content: " (you)";
+  font-weight: 400;
 }
 
 .kaplumbaga {
