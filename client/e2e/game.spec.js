@@ -3,8 +3,7 @@ import { test as base, expect } from '@playwright/test'
 const newRoom = () => `e2e${Math.random().toString(36).slice(2, 8)}`
 
 // a player in their own browser context, like a separate device
-async function openPlayer(browser, name, room, { viaHome = false, language } = {}) {
-  const context = await browser.newContext()
+async function openPlayer(context, name, room, { viaHome = false, language } = {}) {
   await context.addInitScript(([username, lang]) => {
     try {
       localStorage.setItem('username', username)
@@ -42,9 +41,10 @@ const test = base.extend({
   joinAs: async ({ browser }, provide) => {
     const contexts = []
     await provide(async (name, room, options) => {
-      const player = await openPlayer(browser, name, room, options)
-      contexts.push(player.context)
-      return player
+      // registered before anything can fail, so it is always closed
+      const context = await browser.newContext()
+      contexts.push(context)
+      return openPlayer(context, name, room, options)
     })
     await Promise.all(contexts.map((context) => context.close()))
   },
@@ -258,5 +258,22 @@ test('create game opens a new room with a readable code', async ({ page }) => {
 test('invalid room code shows an error', async ({ page }) => {
   await page.goto(`/play/${encodeURIComponent('bad room!')}`)
   await expect(message(page)).toHaveText('invalid room id')
-  await expect(startButton(page)).toBeDisabled()
+  await expect(startButton(page)).toHaveCount(0)
+  await page.getByRole('link', { name: 'Back to the home page' }).click()
+  await expect(page.locator('.room-code-input')).toBeVisible()
+})
+
+test('only the game page connects to the server', async ({ page }) => {
+  const websockets = []
+  page.on('websocket', (ws) => websockets.push(ws))
+  await page.goto('/')
+  await expect(page.locator('.room-code-input')).toBeVisible()
+  await page.waitForTimeout(500)
+  expect(websockets).toHaveLength(0)
+  await page.click('input[value="Create Game"]')
+  await expect(turtles(page)).toHaveCount(1)
+  expect(websockets).toHaveLength(1)
+  // back home closes the connection
+  await page.goBack()
+  await expect.poll(() => websockets[0].isClosed()).toBe(true)
 })

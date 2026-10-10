@@ -28,20 +28,25 @@
 }
 
 .kaplumbaga-wrapper p {
+  display: flex;
   width: fit-content;
   max-width: 50%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre;
 }
 
-.kaplumbaga-wrapper.me p {
+/* a long name is shortened, the "(you)" marker after it stays whole */
+.kaplumbaga-wrapper .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kaplumbaga-wrapper.me .name {
   font-weight: 800;
 }
 
 .kaplumbaga-wrapper.me p::after {
   content: " (you)";
-  font-weight: 400;
+  flex-shrink: 0;
 }
 
 .kaplumbaga {

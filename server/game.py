@@ -10,7 +10,7 @@ import time
 import unicodedata
 
 from flask import Flask, request
-from flask_socketio import SocketIO, join_room, leave_room, emit
+from flask_socketio import SocketIO, join_room, leave_room
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("kaplumbaga")
@@ -58,32 +58,37 @@ DEFAULT_LANGUAGE = "en"
 COUNTDOWN_SECONDS = float(os.environ.get("COUNTDOWN_SECONDS", 3))
 # a race nobody finishes ends after this many seconds, so the room can race again
 RACE_SECONDS = float(os.environ.get("RACE_SECONDS", 180))
-# Progress can't run ahead of the fastest plausible typing, ~300 words per
-# minute, plus a few characters typed right as the text appears. 0 turns the
-# check off (the end-to-end tests type faster than any human).
-MAX_CHARS_PER_SECOND = float(os.environ.get("MAX_CHARS_PER_SECOND", 30))
+# Progress can't run ahead of fast human typing, ~240 words per minute, plus
+# a few characters typed right as the text appears. A finish that comes too
+# early is kept and counts once it's plausible. 0 turns the check off.
+MAX_CHARS_PER_SECOND = float(os.environ.get("MAX_CHARS_PER_SECOND", 20))
 HEAD_START_CHARS = 10
+# sockets that don't join a room within this many seconds are closed
+ROOMLESS_SECONDS = float(os.environ.get("ROOMLESS_SECONDS", 30))
+# how often the room clock runs countdowns, time limits and cleanup
+CLOCK_SECONDS = 0.1
 
 ROOM_ID_PATTERN = re.compile(r"[a-z0-9_-]{1,32}")
 MAX_USERNAME_LENGTH = 24
 
 # room_id -> {"status": "waiting" | "countdown" | "playing" | "finished",
-#             "winner": username | None, "winner_id": sid | None,
 #             "language": key of TEXTS,
-#             "race": id of the current race,
-#             "starts_at": time.monotonic() when the countdown ends,
-#             "started_at": time.monotonic() when the text was sent,
-#             "text": text of the current race,
-#             "racers": sids that got the text, only they can finish,
-#             "players": {sid: {"username": str, "progress": float}}}
+#             "version": increases with every change, see bump(),
+#             "players": {sid: {"username": str, "progress": float}},
+#             plus the race fields of race_fields()}
 ROOM_LIST = {}
 # sid -> room_id, every socket is in at most one room
 PLAYER_ROOMS = {}
-# Guards ROOM_LIST and PLAYER_ROOMS. Messages about a room are queued while
-# holding it too, so every client gets them in the order the state changed.
+# sid -> time.monotonic() of the connection, for closing sockets without a room
+CONNECTED_AT = {}
+# Guards ROOM_LIST, PLAYER_ROOMS and CONNECTED_AT. Never send while holding
+# it: sending to a socket that stopped answering pings closes it, and
+# engineio runs handle_disconnect in the same thread, which needs this lock.
 state_lock = threading.Lock()
-# unique across rooms, so a timer can't touch a newer race
+# unique across rooms, so a deleted and recreated room never reuses one
 race_ids = itertools.count(1)
+versions = itertools.count(1)
+clock_started = False
 
 
 class RateLimiter:
@@ -217,6 +222,10 @@ def rate_limited(limiter):
     return decorator
 
 
+# joiners that shape emoji sequences (👨‍👩‍👧) and Persian or Indic words
+KEPT_FORMAT_CHARACTERS = {"‌", "‍"}
+
+
 def clean_username(value):
     """Printable name: no control, line break or text direction characters."""
     kept = []
@@ -224,8 +233,8 @@ def clean_username(value):
         category = unicodedata.category(ch)
         if category in ("Cc", "Zl", "Zp"):
             kept.append(" ")  # line breaks and tabs become spaces
-        elif not category.startswith("C"):
-            # drops format characters (text direction, zero width), private use, unassigned
+        elif not category.startswith("C") or ch in KEPT_FORMAT_CHARACTERS:
+            # drops text direction and other format characters, private use, unassigned
             kept.append(ch)
     return " ".join("".join(kept).split())[:MAX_USERNAME_LENGTH].strip() or "player"
 
@@ -241,22 +250,45 @@ def unique_username(name, players):
     return candidate
 
 
+def race_fields(**values):
+    """Fields of the current race, empty unless given."""
+    fields = {
+        "race": None,        # id of the race
+        "starts_at": None,   # time.monotonic() when the countdown ends
+        "started_at": None,  # time.monotonic() when the text was sent
+        "text": None,
+        "racers": set(),     # sids that got the text, only they can finish
+        "claims": {},        # sid -> time.monotonic() of a finish sent too early
+        "winner": None,
+        "winner_id": None,
+    }
+    fields.update(values)
+    return fields
+
+
 def new_room(language):
-    return {"status": "waiting", "winner": None, "winner_id": None, "language": language,
-            "race": None, "starts_at": None, "started_at": None, "text": None,
-            "racers": set(), "players": {}}
+    return {"status": "waiting", "language": language, "version": next(versions),
+            "players": {}, **race_fields()}
 
 
-def room_state(room):
+def bump(room):
+    """Mark a change. Messages carry the version, so a client can drop one
+    that arrives after a newer one (they are sent outside the lock)."""
+    ROOM_LIST[room]["version"] = next(versions)
+
+
+def room_state(room, now=None):
     state = {
         "players": dict(ROOM_LIST[room]["players"]),
         "status": ROOM_LIST[room]["status"],
         "winner": ROOM_LIST[room]["winner"],
         "winner_id": ROOM_LIST[room]["winner_id"],
         "language": ROOM_LIST[room]["language"],
+        "version": ROOM_LIST[room]["version"],
     }
     if state["status"] == "countdown":
-        state["starts_in"] = max(0.0, ROOM_LIST[room]["starts_at"] - time.monotonic())
+        now = time.monotonic() if now is None else now
+        state["starts_in"] = max(0.0, ROOM_LIST[room]["starts_at"] - now)
     return state
 
 
@@ -271,15 +303,48 @@ def channel(room):
     return f"game:{room}"
 
 
-def finish_race(room, winner_id=None):
+def send(outbox):
+    """Send (event, data, room) messages collected under state_lock, after releasing it."""
+    for event, data, room in outbox:
+        socketio.emit(event, data, to=channel(room))
+
+
+def start_race(room, now, outbox):
+    """Countdown is over: send the text. Hold state_lock."""
+    state = ROOM_LIST[room]
+    state.update(status="playing", starts_at=None, started_at=now,
+                 text=TEXTS[state["language"]], racers=set(state["players"]))
+    bump(room)
+    # text first, so clients never see "playing" without a text
+    outbox.append(("load_text", {"text": state["text"], "version": state["version"]}, room))
+    outbox.append(("room_update", room_state(room, now), room))
+
+
+def finish_race(room, outbox, winner_id=None):
     """End the race, without a winner when nobody finished. Hold state_lock."""
     state = ROOM_LIST[room]
-    winner = state["players"][winner_id]["username"] if winner_id else None
-    state.update(status="finished", winner=winner, winner_id=winner_id, racers=set())
-    socketio.emit("finish_game", {"winner": winner, "winner_id": winner_id}, to=channel(room))
+    winner = None
+    if winner_id:
+        winner = state["players"][winner_id]["username"]
+        state["players"][winner_id]["progress"] = 100
+        outbox.append(("progress_percentage", {"user_id": winner_id, "progress": 100,
+                                               "version": state["version"]}, room))
+        log.info("room %s won by %s", room, winner)
+    state.update(status="finished", winner=winner, winner_id=winner_id,
+                 racers=set(), claims={})
+    bump(room)
+    outbox.append(("finish_game", {"winner": winner, "winner_id": winner_id,
+                                   "version": state["version"]}, room))
 
 
-def remove_player(user_id):
+def finish_is_plausible(state, now):
+    if not MAX_CHARS_PER_SECOND:
+        return True
+    typing_seconds = max(0, len(state["text"]) - HEAD_START_CHARS) / MAX_CHARS_PER_SECOND
+    return now >= state["started_at"] + typing_seconds
+
+
+def remove_player(user_id, outbox):
     """Remove a player from their room. Hold state_lock.
 
     Deletes the room when it gets empty, and ends a race when nobody racing is
@@ -291,12 +356,46 @@ def remove_player(user_id):
     state = ROOM_LIST[room]
     state["players"].pop(user_id, None)
     state["racers"].discard(user_id)
+    state["claims"].pop(user_id, None)
     if not state["players"]:
         del ROOM_LIST[room]
-    elif state["status"] == "playing" and not state["racers"]:
+        return room
+    bump(room)
+    if state["status"] == "playing" and not state["racers"]:
         # only players who joined mid-race are left, let them start a new one
-        finish_race(room)
+        finish_race(room, outbox)
+    outbox.append(("room_update", room_state(room), room))
     return room
+
+
+def tick():
+    """Run countdowns, early finishes, time limits and cleanup. The room clock calls this."""
+    now = time.monotonic()
+    outbox = []
+    with state_lock:
+        for room, state in ROOM_LIST.items():
+            if state["status"] == "countdown" and now >= state["starts_at"]:
+                start_race(room, now, outbox)
+            elif state["status"] == "playing":
+                if state["claims"] and finish_is_plausible(state, now):
+                    finish_race(room, outbox, min(state["claims"], key=state["claims"].get))
+                elif now >= state["started_at"] + RACE_SECONDS:
+                    finish_race(room, outbox)
+        roomless = [sid for sid, since in CONNECTED_AT.items()
+                    if sid not in PLAYER_ROOMS and now - since > ROOMLESS_SECONDS]
+    send(outbox)
+    for sid in roomless:
+        socketio.server.disconnect(sid)
+
+
+def room_clock():
+    """One thread for every room's timers, instead of a thread per race."""
+    while True:
+        socketio.sleep(CLOCK_SECONDS)
+        try:
+            tick()
+        except Exception:
+            log.exception("room clock")
 
 
 @app.get("/healthz")
@@ -305,19 +404,31 @@ def healthz():
             "sockets": connection_limits.total}
 
 
+@socketio.on("connect")
+def handle_connect(auth=None):
+    global clock_started
+    with state_lock:
+        CONNECTED_AT[request.sid] = time.monotonic()
+        start_clock = not clock_started
+        clock_started = True
+    if start_clock:
+        socketio.start_background_task(room_clock)
+
+
 @socketio.on("disconnect")
 def handle_disconnect(reason=None):
+    outbox = []
     with state_lock:
-        room = remove_player(request.sid)
-        if room in ROOM_LIST:
-            emit("room_update", room_state(room), to=channel(room))
+        CONNECTED_AT.pop(request.sid, None)
+        remove_player(request.sid, outbox)
+    send(outbox)
     PROGRESS_LIMIT.forget(request.sid)
     ACTION_LIMIT.forget(request.sid)
 
 
 @socketio.on("join")
 @rate_limited(ACTION_LIMIT)
-def handle_join(data):
+def handle_join(data=None):
     if not isinstance(data, dict):
         return {"ok": False, "error": "invalid request"}
     # codes are lowercase, phone keyboards like to capitalize the first letter
@@ -331,38 +442,40 @@ def handle_join(data):
         language = DEFAULT_LANGUAGE
 
     user_id = request.sid
+    outbox = []
     with state_lock:
-        old_room = remove_player(user_id)
+        old_room = remove_player(user_id, outbox)
         if old_room is not None and old_room != room:
             leave_room(channel(old_room))
-            if old_room in ROOM_LIST:
-                emit("room_update", room_state(old_room), to=channel(old_room))
         if room not in ROOM_LIST:
             ROOM_LIST[room] = new_room(language)
         players = ROOM_LIST[room]["players"]
         players[user_id] = {"progress": 0, "username": unique_username(username, players)}
         PLAYER_ROOMS[user_id] = room
+        bump(room)
         join_room(channel(room))
-        emit("room_update", room_state(room), to=channel(room))
+        outbox.append(("room_update", room_state(room), room))
+    send(outbox)
     return {"ok": True}
 
 
 @socketio.on("leave")
 def handle_leave(data=None):
+    outbox = []
     with state_lock:
-        room = remove_player(request.sid)
+        room = remove_player(request.sid, outbox)
         if room is not None:
             leave_room(channel(room))
-            if room in ROOM_LIST:
-                emit("room_update", room_state(room), to=channel(room))
+    send(outbox)
 
 
 @socketio.on("set_language")
 @rate_limited(ACTION_LIMIT)
-def handle_set_language(data):
+def handle_set_language(data=None):
     language = data.get("language") if isinstance(data, dict) else None
     if not isinstance(language, str) or language not in TEXTS:
         return {"ok": False, "error": "invalid language"}
+    outbox = []
     with state_lock:
         room = PLAYER_ROOMS.get(request.sid)
         if room is None:
@@ -370,70 +483,49 @@ def handle_set_language(data):
         if ROOM_LIST[room]["status"] in ("countdown", "playing"):
             return {"ok": False, "error": "game already running"}
         ROOM_LIST[room]["language"] = language
-        emit("room_update", room_state(room), to=channel(room))
+        bump(room)
+        outbox.append(("room_update", room_state(room), room))
+    send(outbox)
     return {"ok": True}
 
 
 @socketio.on("game_start")
 @rate_limited(ACTION_LIMIT)
 def handle_game_start(data=None):
+    outbox = []
     with state_lock:
         room = PLAYER_ROOMS.get(request.sid)
         if room is None or ROOM_LIST[room]["status"] in ("countdown", "playing"):
             return {"ok": False, "error": "game already running"}
-        race = next(race_ids)
-        ROOM_LIST[room].update(status="countdown", winner=None, winner_id=None, race=race,
-                               starts_at=time.monotonic() + COUNTDOWN_SECONDS,
-                               started_at=None, text=None, racers=set())
+        # the room clock sends the text when the countdown is over
+        ROOM_LIST[room].update(status="countdown", **race_fields(
+            race=next(race_ids), starts_at=time.monotonic() + COUNTDOWN_SECONDS))
         for player in ROOM_LIST[room]["players"].values():
             player["progress"] = 0
-        emit("room_update", room_state(room), to=channel(room))
-    socketio.start_background_task(start_race, room, race)
+        bump(room)
+        outbox.append(("room_update", room_state(room), room))
+    send(outbox)
     return {"ok": True}
 
 
-def start_race(room, race):
-    """Send the text when the countdown ends, runs in a background thread."""
-    socketio.sleep(COUNTDOWN_SECONDS)
-    with state_lock:
-        # the room may be gone, or empty and created again, since the countdown began
-        if room not in ROOM_LIST or ROOM_LIST[room]["race"] != race:
-            return
-        state = ROOM_LIST[room]
-        text = TEXTS[state["language"]]
-        state.update(status="playing", starts_at=None, started_at=time.monotonic(),
-                     text=text, racers=set(state["players"]))
-        # text first, so clients never see "playing" without a text
-        socketio.emit("load_text", text, to=channel(room))
-        socketio.emit("room_update", room_state(room), to=channel(room))
-    socketio.start_background_task(end_race_in_time, room, race)
-
-
-def end_race_in_time(room, race):
-    """End the race after RACE_SECONDS if nobody finished, runs in a background thread."""
-    socketio.sleep(RACE_SECONDS)
-    with state_lock:
-        if (room in ROOM_LIST and ROOM_LIST[room]["race"] == race
-                and ROOM_LIST[room]["status"] == "playing"):
-            finish_race(room)
-
-
 @socketio.on("progress")
-def handle_progress(data):
+def handle_progress(data=None):
     user_id = request.sid
     try:
         progress = float(data["progress"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         return
     # float() accepts "nan" and "inf", NaN would also slip through the clamp
     # and break JSON parsing on every client in the room
     if not math.isfinite(progress):
         return
     progress = min(max(progress, 0), 100)
-    # over the limit only the turtle's position lags, never drop the finish
-    if progress < 100 and not PROGRESS_LIMIT.allow(user_id):
+    # over the limit the update isn't sent, only a finish is still recorded
+    allowed = PROGRESS_LIMIT.allow(user_id)
+    if not allowed and progress < 100:
         return
 
+    outbox = []
     with state_lock:
         room = PLAYER_ROOMS.get(user_id)
         if room is None:
@@ -442,15 +534,19 @@ def handle_progress(data):
         # players who joined mid-race never got the text, they watch
         if state["status"] != "playing" or user_id not in state["racers"]:
             return
-        if MAX_CHARS_PER_SECOND:
-            elapsed = time.monotonic() - state["started_at"]
-            typed = HEAD_START_CHARS + elapsed * MAX_CHARS_PER_SECOND
-            progress = min(progress, typed / len(state["text"]) * 100)
-        state["players"][user_id]["progress"] = progress
-        emit("progress_percentage", {"user_id": user_id, "progress": progress}, to=channel(room))
+        now = time.monotonic()
         if progress >= 100:
-            log.info("room %s won by %s", room, state["players"][user_id]["username"])
-            finish_race(room, winner_id=user_id)
+            state["claims"].setdefault(user_id, now)
+        if MAX_CHARS_PER_SECOND:
+            typed = HEAD_START_CHARS + (now - state["started_at"]) * MAX_CHARS_PER_SECOND
+            progress = min(progress, typed / len(state["text"]) * 100)
+        if allowed and progress < 100:
+            state["players"][user_id]["progress"] = progress
+            outbox.append(("progress_percentage", {"user_id": user_id, "progress": progress,
+                                                   "version": state["version"]}, room))
+        if user_id in state["claims"] and finish_is_plausible(state, now):
+            finish_race(room, outbox, min(state["claims"], key=state["claims"].get))
+    send(outbox)
 
 
 if __name__ == "__main__":

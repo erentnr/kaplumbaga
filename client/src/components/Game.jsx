@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useParams } from "react-router";
+import { Link, useParams } from "react-router";
 
 import '../Game.css';
 
@@ -7,12 +7,13 @@ import TurtleSvg from '../assets/turtle.svg';
 import { getUsername } from '../username';
 import { LANGUAGES, getPreferredLanguage, savePreferredLanguage } from '../languages';
 
-const Game = ({socket}) => {
+// One race room. Mounted again after every reconnection, so a new socket
+// starts with a clean state.
+const Race = ({socket, roomID, onFatalError}) => {
   const [competitors, setCompetitors] = useState({});
   const [status, setStatus] = useState('waiting');
   const [winner, setWinner] = useState(null);
   const [winnerID, setWinnerID] = useState(null);
-  const [joinError, setJoinError] = useState('');
   const [randomText, setRandomText] = useState('');
   const [current, setCurrent] = useState(0);
   const [userInput, setUserInput] = useState('');
@@ -22,17 +23,24 @@ const Game = ({socket}) => {
 
   const inputRef = useRef(null);
 
-  const params = useParams();
-  // room codes are lowercase, phone keyboards like to capitalize them
-  const roomID = params.room_id.toLowerCase();
-
   const [username] = useState(getUsername);
 
   const words = randomText ? randomText.split(" ") : [];
 
   useEffect(() => {
+    // The server sends messages after releasing its lock, so they can arrive
+    // out of order. Each carries the room version it was made from, drop
+    // anything older than what was already seen.
+    let latestVersion = 0
+    const isStale = (data) => {
+      if (data.version < latestVersion) return true
+      latestVersion = data.version
+      return false
+    }
+
     // players, game status, winner and text language of the room
     const onRoomUpdate = (state) => {
+      if (isStale(state)) return
       setCompetitors(state.players)
       setStatus(state.status)
       setWinner(state.winner)
@@ -50,8 +58,9 @@ const Game = ({socket}) => {
       }
     }
     // get the text sent from server, reset typing state for the new game
-    const onLoadText = (text) => {
-      setRandomText(text)
+    const onLoadText = (data) => {
+      if (isStale(data)) return
+      setRandomText(data.text)
       setCurrent(0)
       setUserInput('')
       setWinner(null)
@@ -60,6 +69,7 @@ const Game = ({socket}) => {
     }
     // get current progress of a competitor
     const onProgress = (data) => {
+      if (isStale(data)) return
       setCompetitors(
         prev => ({
           ...prev,
@@ -71,6 +81,7 @@ const Game = ({socket}) => {
       )
     }
     const onFinish = (data) => {
+      if (isStale(data)) return
       setStatus('finished')
       setWinner(data.winner)
       setWinnerID(data.winner_id)
@@ -91,7 +102,7 @@ const Game = ({socket}) => {
           // rate limited, try again in a moment instead of giving up
           retryTimer = setTimeout(join, 2000)
         } else {
-          setJoinError(response?.error || 'Could not join the room')
+          onFatalError(response?.error || 'Could not join the room')
         }
       })
     }
@@ -107,7 +118,7 @@ const Game = ({socket}) => {
       socket.off('progress_percentage', onProgress)
       socket.off('finish_game', onFinish)
     }
-  }, [socket, roomID, username]);
+  }, [socket, roomID, username, onFatalError]);
 
   // tick while counting down
   useEffect(() => {
@@ -172,9 +183,7 @@ const Game = ({socket}) => {
   const secondsLeft = countdownEnd === null ? 0 : Math.max(0, Math.ceil((countdownEnd - now) / 1000))
 
   let message
-  if (joinError) {
-    message = joinError
-  } else if (status === 'finished' && !winner) {
+  if (status === 'finished' && !winner) {
     message = 'Race over, nobody finished.'
   } else if (status === 'finished') {
     // the id tells apart players with the same name
@@ -206,7 +215,7 @@ const Game = ({socket}) => {
                 className={competitorID === socket.id ? "kaplumbaga-wrapper me" : "kaplumbaga-wrapper"}
                 key={competitorID}
               >
-                <p style={position}>{competitor.username}</p>
+                <p style={position}><span className="name">{competitor.username}</span></p>
                 <img
                   className="kaplumbaga"
                   src={TurtleSvg}
@@ -248,7 +257,7 @@ const Game = ({socket}) => {
           aria-label="Text language"
           value={language}
           onChange={handleLanguage}
-          disabled={isRacing || !!joinError}
+          disabled={isRacing}
         >
           {LANGUAGES.map(({code, name}) => (
             <option key={code} value={code}>{name}</option>
@@ -259,12 +268,72 @@ const Game = ({socket}) => {
           value="Start"
           className="start-button"
           onClick={handleStart}
-          disabled={isRacing || !!joinError}
+          disabled={isRacing}
         />
       </div>
       <p className="game-message">{message}</p>
     </div>
   );
+};
+
+// Holds the server connection while a game page is open, the home page
+// doesn't need one.
+const Game = ({socket}) => {
+  const [isConnected, setIsConnected] = useState(socket.connected);
+  const [connectionFailed, setConnectionFailed] = useState(false);
+  const [fatalError, setFatalError] = useState('');
+
+  const params = useParams();
+  // room codes are lowercase, phone keyboards like to capitalize them
+  const roomID = params.room_id.toLowerCase();
+
+  useEffect(() => {
+    const onConnect = () => {
+      setIsConnected(true);
+      setConnectionFailed(false);
+    };
+    const onDisconnect = (reason) => {
+      setIsConnected(false);
+      // socket.io-client reconnects by itself, except when the server closed the connection
+      if (reason === 'io server disconnect') {
+        setFatalError('Disconnected from the game server, reload the page to join again.');
+      }
+    };
+    const onConnectError = () => setConnectionFailed(true);
+
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+    socket.on('connect_error', onConnectError);
+    socket.connect();
+    return () => {
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+      socket.off('connect_error', onConnectError);
+      socket.disconnect();
+    };
+  }, [socket]);
+
+  // an error that joining again won't fix, like an invalid room code
+  useEffect(() => {
+    if (fatalError) socket.disconnect();
+  }, [socket, fatalError]);
+
+  if (fatalError) {
+    return (
+      <div className="main">
+        <p className="game-message">{fatalError}</p>
+        <Link to="/">Back to the home page</Link>
+      </div>
+    );
+  }
+  if (!isConnected) {
+    return (
+      <div className="main">
+        <h2>{connectionFailed ? "Can't reach the game server, retrying..." : "Connecting..."}</h2>
+      </div>
+    );
+  }
+  return <Race socket={socket} roomID={roomID} onFatalError={setFatalError} />;
 };
 
 export default Game;

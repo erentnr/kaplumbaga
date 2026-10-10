@@ -11,9 +11,11 @@ import game
 
 
 def reset_state():
-    for state in (game.ROOM_LIST, game.PLAYER_ROOMS, game.connection_limits.per_client):
+    for state in (game.ROOM_LIST, game.PLAYER_ROOMS, game.CONNECTED_AT,
+                  game.connection_limits.per_client):
         state.clear()
     game.connection_limits.total = 0
+    game.clock_started = False
     for limiter in (game.PROGRESS_LIMIT, game.ACTION_LIMIT, game.CONNECT_LIMIT):
         limiter.clear()
 
@@ -32,33 +34,21 @@ def no_typing_speed_check(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def instant_countdown(monkeypatch):
-    """Run the countdown inline, so game_start sends the text right away.
-
-    Returns the race time limit timers, they wait until a test runs them.
-    """
-    race_timers = []
-
-    def start_background_task(target, *args):
-        if target is game.start_race:
-            target(*args)
-        else:
-            race_timers.append(lambda: target(*args))
-
+def background_tasks(monkeypatch):
+    """No real threads: tests run the room clock with tick(). Returns the
+    functions the server tried to start in the background."""
+    started = []
     monkeypatch.setattr(game, "COUNTDOWN_SECONDS", 0)
-    monkeypatch.setattr(game.socketio, "sleep", lambda seconds: None)
-    monkeypatch.setattr(game.socketio, "start_background_task", start_background_task)
-    return race_timers
-
-
-@pytest.fixture
-def paused_countdown(monkeypatch):
-    """Keep every timer until the test runs it."""
-    timers = []
-    monkeypatch.setattr(game, "COUNTDOWN_SECONDS", 3)
     monkeypatch.setattr(game.socketio, "start_background_task",
-                        lambda target, *args: timers.append(lambda: target(*args)))
-    return timers
+                        lambda target, *args: started.append(target))
+    return started
+
+
+def start(client):
+    """Press Start and let the room clock end the (zero second) countdown."""
+    reply = client.emit("game_start", callback=True)
+    game.tick()
+    return reply
 
 
 def connect(username, room="abc12", language=None):
@@ -86,6 +76,15 @@ def sid_of(username, room="abc12"):
 def events(client, name):
     return [msg["args"][0] if msg["args"] else None
             for msg in client.get_received() if msg["name"] == name]
+
+
+def texts(client):
+    return [data["text"] for data in events(client, "load_text")]
+
+
+def finishes(client):
+    return [{"winner": data["winner"], "winner_id": data["winner_id"]}
+            for data in events(client, "finish_game")]
 
 
 def test_join_broadcasts_players():
@@ -127,6 +126,13 @@ def test_join_with_a_bad_payload_gets_an_error(payload):
     assert client.emit("join", payload, callback=True) == {"ok": False, "error": "invalid request"}
 
 
+@pytest.mark.parametrize("event", ["join", "set_language", "progress", "game_start", "leave"])
+def test_events_without_data_do_not_crash(event, caplog):
+    client = game.socketio.test_client(game.app)
+    client.emit(event, callback=True)
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
 def test_join_with_a_non_string_language_uses_the_default():
     client = game.socketio.test_client(game.app)
     data = {"room_id": "abc12", "username": "alice", "language": ["tr"]}
@@ -139,6 +145,14 @@ def test_username_is_trimmed_and_capped():
     state = events(client, "room_update")[-1]
     (player,) = state["players"].values()
     assert player["username"] == "x" * game.MAX_USERNAME_LENGTH
+
+
+def test_username_keeps_joiners_of_emoji_and_words():
+    # zero width joiner builds 👨‍👩‍👧, zero width non-joiner is part of Persian words
+    connect("\U0001f468\u200d\U0001f469\u200d\U0001f467")
+    connect("\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645")
+    assert set(names()) == {"\U0001f468\u200d\U0001f469\u200d\U0001f467",
+                            "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"}
 
 
 def test_username_control_and_direction_characters_are_removed():
@@ -193,9 +207,9 @@ def test_joining_another_room_leaves_the_old_one():
 def test_full_game_flow():
     alice = connect("alice")
     bob = connect("bob")
-    alice.emit("game_start")
-    assert events(bob, "load_text") == [game.TEXTS["en"]]
-    assert events(alice, "load_text") == [game.TEXTS["en"]]
+    start(alice)
+    assert texts(bob) == [game.TEXTS["en"]]
+    assert texts(alice) == [game.TEXTS["en"]]
 
     # a second start while playing is ignored
     assert bob.emit("game_start", callback=True)["ok"] is False
@@ -205,7 +219,7 @@ def test_full_game_flow():
 
     alice_id = sid_of("alice")
     alice.emit("progress", {"progress": 100})
-    assert events(bob, "finish_game") == [{"winner": "alice", "winner_id": alice_id}]
+    assert finishes(bob) == [{"winner": "alice", "winner_id": alice_id}]
     assert status() == "finished"
     assert game.ROOM_LIST["abc12"]["winner_id"] == alice_id
 
@@ -213,7 +227,7 @@ def test_full_game_flow():
     bob.emit("progress", {"progress": 100})
     assert events(bob, "finish_game") == []
     assert game.ROOM_LIST["abc12"]["winner"] == "alice"
-    bob.emit("game_start")
+    start(bob)
     assert all(p["progress"] == 0 for p in game.ROOM_LIST["abc12"]["players"].values())
 
 
@@ -221,7 +235,7 @@ def test_progress_is_validated():
     alice = connect("alice")
     alice.emit("progress", {"progress": 100})  # game not started
     assert status() == "waiting"
-    alice.emit("game_start")
+    start(alice)
     alice.emit("progress", {"progress": "lots"})
     alice.emit("progress", {"progress": -20})
     alice.emit("progress", ["not", "a", "dict"])
@@ -233,7 +247,7 @@ def test_progress_is_validated():
 def test_non_finite_progress_is_rejected(value):
     alice = connect("alice")
     bob = connect("bob")
-    alice.emit("game_start")
+    start(alice)
     bob.get_received()
     alice.emit("progress", {"progress": value})
     assert events(bob, "progress_percentage") == []
@@ -250,7 +264,7 @@ def test_room_named_after_a_socket_id_does_not_reach_that_player():
     victim.get_received()
 
     attacker = connect("attacker", room=victim_sid.lower())
-    attacker.emit("game_start")
+    start(attacker)
     attacker.emit("progress", {"progress": 100})
     assert victim.get_received() == []
     assert status("room2") == "waiting"
@@ -265,7 +279,7 @@ def test_progress_from_stranger_is_ignored():
 
 def test_players_who_joined_mid_race_cannot_finish():
     alice = connect("alice")
-    alice.emit("game_start")
+    start(alice)
     carol = connect("carol")  # never got the text
     carol.emit("progress", {"progress": 100})
     assert status() == "playing" and game.ROOM_LIST["abc12"]["winner"] is None
@@ -276,66 +290,112 @@ def test_players_who_joined_mid_race_cannot_finish():
 def test_race_ends_when_everyone_racing_has_left():
     alice = connect("alice")
     bob = connect("bob")
-    alice.emit("game_start")
+    start(alice)
     carol = connect("carol")  # watches the race
     carol.get_received()
     alice.disconnect()
     assert status() == "playing"
     bob.emit("leave")
-    assert events(carol, "finish_game") == [{"winner": None, "winner_id": None}]
+    assert finishes(carol) == [{"winner": None, "winner_id": None}]
     assert status() == "finished"
-    assert carol.emit("game_start", callback=True) == {"ok": True}
-    assert events(carol, "load_text") == [game.TEXTS["en"]]
+    assert start(carol) == {"ok": True}
+    assert texts(carol) == [game.TEXTS["en"]]
 
 
-def test_race_ends_after_the_time_limit(instant_countdown):
+def test_race_ends_after_the_time_limit(clock):
     alice = connect("alice")
-    alice.emit("game_start")
+    start(alice)
     alice.get_received()
-    (time_limit,) = instant_countdown
-    time_limit()
-    assert events(alice, "finish_game") == [{"winner": None, "winner_id": None}]
-    assert status() == "finished"
-    assert alice.emit("game_start", callback=True) == {"ok": True}
-
-
-def test_time_limit_of_an_old_race_does_not_end_a_new_one(instant_countdown):
-    alice = connect("alice")
-    alice.emit("game_start")
-    alice.emit("progress", {"progress": 100})
-    alice.emit("game_start")
-    old_limit, new_limit = instant_countdown
-    old_limit()
+    clock.advance(game.RACE_SECONDS - 1)
+    game.tick()
     assert status() == "playing"
-    new_limit()
+    clock.advance(1)
+    game.tick()
+    assert finishes(alice) == [{"winner": None, "winner_id": None}]
     assert status() == "finished"
+    assert start(alice) == {"ok": True}
+
+
+def test_time_limit_counts_from_the_current_race(clock):
+    alice = connect("alice")
+    start(alice)
+    alice.emit("progress", {"progress": 100})
+    clock.advance(game.RACE_SECONDS - 10)
+    start(alice)
+    clock.advance(20)  # past the first race's limit, not the second's
+    game.tick()
+    assert status() == "playing"
+
+
+def test_races_do_not_start_threads(background_tasks):
+    # a thread sleeping through every race's time limit piled up with
+    # join, start, leave loops until no new thread could start
+    for i in range(50):
+        client = connect(f"player{i}", room=f"room{i}")
+        start(client)
+        client.emit("leave")
+    assert background_tasks == [game.room_clock]
 
 
 def test_progress_cannot_outrun_human_typing(monkeypatch, clock):
-    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 30)
+    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 20)
     length = len(game.TEXTS["en"])
     alice = connect("alice")
-    alice.emit("game_start")
+    start(alice)
 
     def progress():
         return game.ROOM_LIST["abc12"]["players"][sid_of("alice")]["progress"]
 
     # a devtools one-liner right as the text appears
-    alice.emit("progress", {"progress": 100})
-    assert status() == "playing"
+    alice.emit("progress", {"progress": 99})
     assert progress() == pytest.approx(game.HEAD_START_CHARS / length * 100)
     clock.advance(1)
-    alice.emit("progress", {"progress": 100})
-    assert progress() == pytest.approx((game.HEAD_START_CHARS + 30) / length * 100)
+    alice.emit("progress", {"progress": 99})
+    assert progress() == pytest.approx((game.HEAD_START_CHARS + 20) / length * 100)
     assert status() == "playing"
-    clock.advance(length / 30)
+
+
+def test_early_finish_counts_once_it_is_plausible(monkeypatch, clock):
+    # the client sends nothing after the last word, so a finish that comes
+    # too early must not be lost
+    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 20)
+    plausible_after = (len(game.TEXTS["en"]) - game.HEAD_START_CHARS) / 20
+    alice = connect("alice")
+    bob = connect("bob")
+    start(alice)
     alice.emit("progress", {"progress": 100})
-    assert status() == "finished" and game.ROOM_LIST["abc12"]["winner"] == "alice"
+    assert status() == "playing"
+    clock.advance(1)
+    bob.emit("progress", {"progress": 100})  # later claim
+    clock.advance(plausible_after - 1.5)
+    game.tick()
+    assert status() == "playing"
+    bob.get_received()
+    clock.advance(1)
+    game.tick()
+    assert status() == "finished"
+    assert finishes(bob) == [{"winner": "alice", "winner_id": sid_of("alice")}]
+    assert game.ROOM_LIST["abc12"]["players"][sid_of("alice")]["progress"] == 100
 
 
-def test_room_messages_are_sent_while_holding_the_state_lock(monkeypatch):
-    # sent after releasing the lock, a "countdown" update from a join could
-    # arrive after the race text and wipe it on every client
+def test_finish_messages_are_rate_limited_too(monkeypatch, clock):
+    # 100 used to skip the rate limit, with the speed check it no longer ends
+    # the race, so every one of them was broadcast
+    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 20)
+    alice = connect("alice")
+    bob = connect("bob")
+    start(alice)
+    bob.get_received()
+    for _ in range(1000):
+        alice.emit("progress", {"progress": 100})
+    assert len(events(bob, "progress_percentage")) <= game.PROGRESS_LIMIT.burst
+    assert status() == "playing"
+    assert sid_of("alice") in game.ROOM_LIST["abc12"]["claims"]
+
+
+def test_messages_are_never_sent_while_holding_the_state_lock(monkeypatch):
+    # a send can close a socket that stopped answering pings, and engineio
+    # then runs handle_disconnect in the same thread, which needs the lock
     sent = []
     real_emit = game.socketio.emit
 
@@ -347,14 +407,50 @@ def test_room_messages_are_sent_while_holding_the_state_lock(monkeypatch):
     alice = connect("alice")
     bob = connect("bob")
     alice.emit("set_language", {"language": "de"})
-    alice.emit("game_start")
+    start(alice)
     bob.emit("progress", {"progress": 30})
     alice.emit("progress", {"progress": 100})
     bob.emit("join", {"room_id": "other", "username": "bob"})
     alice.disconnect()
     assert {event for event, _ in sent} == {
         "room_update", "load_text", "progress_percentage", "finish_game"}
-    assert all(locked for _, locked in sent), sent
+    assert not any(locked for _, locked in sent), sent
+
+
+def test_a_socket_closing_while_messages_are_sent_does_not_deadlock(monkeypatch):
+    alice = connect("alice")
+    bob = connect("bob")
+    start(alice)
+    real_emit = game.socketio.emit
+    closed = []
+
+    def emit_and_close_bob(event, *args, **kwargs):
+        # what engineio does when a send finds a client that stopped answering pings
+        if event == "progress_percentage" and not closed:
+            closed.append(True)
+            bob.disconnect()
+        return real_emit(event, *args, **kwargs)
+
+    monkeypatch.setattr(game.socketio, "emit", emit_and_close_bob)
+    done = threading.Event()
+    threading.Thread(target=lambda: (alice.emit("progress", {"progress": 10}), done.set()),
+                     daemon=True).start()
+    assert done.wait(3), "server deadlocked"
+    assert names() == ["alice"]
+
+
+def test_messages_carry_increasing_room_versions():
+    # sent outside the lock, messages can arrive out of order: clients drop
+    # anything older than the newest version they have seen
+    alice = connect("alice")
+    bob = connect("bob")
+    start(alice)
+    alice.emit("progress", {"progress": 100})
+    versions = [msg["args"][0]["version"] for msg in alice.get_received()
+                if msg["name"] in ("room_update", "load_text", "finish_game")]
+    assert len(versions) >= 5
+    assert versions == sorted(versions)
+    assert len(set(versions)) >= 4
 
 
 def test_events_of_a_client_are_handled_in_order():
@@ -362,7 +458,23 @@ def test_events_of_a_client_are_handled_in_order():
     assert game.socketio.server.async_handlers is False
 
 
-def test_countdown_comes_before_the_text(paused_countdown):
+def test_sockets_without_a_room_are_closed(clock):
+    idle = game.socketio.test_client(game.app)
+    player = connect("alice")
+    clock.advance(game.ROOMLESS_SECONDS + 1)
+    game.tick()
+    assert not idle.is_connected()
+    assert player.is_connected()
+    assert list(game.CONNECTED_AT) == [sid_of("alice")]
+
+
+@pytest.fixture
+def countdown(monkeypatch, clock):
+    monkeypatch.setattr(game, "COUNTDOWN_SECONDS", 3)
+    return clock
+
+
+def test_countdown_comes_before_the_text(countdown):
     alice = connect("alice")
     bob = connect("bob")
     bob.get_received()
@@ -372,42 +484,46 @@ def test_countdown_comes_before_the_text(paused_countdown):
     assert [msg["name"] for msg in received] == ["room_update"]
     state = received[0]["args"][0]
     assert state["status"] == "countdown"
-    assert 0 < state["starts_in"] <= game.COUNTDOWN_SECONDS
+    assert state["starts_in"] == 3
 
     # nothing can start, change or score while counting down
     assert bob.emit("game_start", callback=True)["ok"] is False
     assert bob.emit("set_language", {"language": "de"}, callback=True)["ok"] is False
     bob.emit("progress", {"progress": 100})
+    countdown.advance(2.9)
+    game.tick()
     assert status() == "countdown"
     assert events(alice, "finish_game") == []
 
-    (timer,) = paused_countdown
-    timer()
+    countdown.advance(0.1)
+    game.tick()
     received = bob.get_received()
     assert [msg["name"] for msg in received] == ["load_text", "room_update"]
-    assert received[0]["args"][0] == game.TEXTS["en"]
+    assert received[0]["args"][0]["text"] == game.TEXTS["en"]
     assert received[1]["args"][0]["status"] == "playing"
     assert "starts_in" not in received[1]["args"][0]
 
 
-def test_late_joiner_during_countdown_gets_the_text(paused_countdown):
+def test_late_joiner_during_countdown_gets_the_text(countdown):
     alice = connect("alice")
     alice.emit("game_start")
     carol = connect("carol")
     assert events(carol, "room_update")[-1]["status"] == "countdown"
-    paused_countdown[0]()
-    assert events(carol, "load_text") == [game.TEXTS["en"]]
+    countdown.advance(3)
+    game.tick()
+    assert texts(carol) == [game.TEXTS["en"]]
     assert sid_of("carol") in game.ROOM_LIST["abc12"]["racers"]
 
 
-def test_countdown_of_a_deleted_room_does_nothing(paused_countdown):
+def test_countdown_of_a_deleted_room_does_nothing(countdown):
     alice = connect("alice")
     alice.emit("game_start")
     alice.emit("leave")
     assert game.ROOM_LIST == {}
-    # same room code created again while the old timer is pending
+    # same room code created again
     bob = connect("bob")
-    paused_countdown[0]()
+    countdown.advance(3)
+    game.tick()
     assert status() == "waiting"
     assert events(bob, "load_text") == []
 
@@ -416,8 +532,8 @@ def test_room_language_comes_from_the_creator():
     alice = connect("alice", language="de")
     connect("bob", language="fr")
     assert events(alice, "room_update")[-1]["language"] == "de"
-    alice.emit("game_start")
-    assert events(alice, "load_text") == [game.TEXTS["de"]]
+    start(alice)
+    assert texts(alice) == [game.TEXTS["de"]]
 
 
 def test_unknown_language_falls_back_to_default():
@@ -431,8 +547,8 @@ def test_set_language_is_broadcast_and_used_for_the_next_race():
     bob.get_received()
     assert alice.emit("set_language", {"language": "tr"}, callback=True) == {"ok": True}
     assert events(bob, "room_update")[-1]["language"] == "tr"
-    bob.emit("game_start")
-    assert events(alice, "load_text") == [game.TEXTS["tr"]]
+    start(bob)
+    assert texts(alice) == [game.TEXTS["tr"]]
 
 
 @pytest.mark.parametrize("payload", [{"language": "xx"}, {}, "tr", None, {"language": ["tr"]}])
@@ -474,7 +590,7 @@ def clock(monkeypatch):
 def test_progress_flood_is_limited_but_the_finish_gets_through(clock):
     alice = connect("alice")
     bob = connect("bob")
-    alice.emit("game_start")
+    start(alice)
     bob.get_received()
     for i in range(1, 100):
         alice.emit("progress", {"progress": i})
@@ -487,7 +603,7 @@ def test_progress_flood_is_limited_but_the_finish_gets_through(clock):
 
 def test_progress_limit_refills_over_time(clock):
     alice = connect("alice")
-    alice.emit("game_start")
+    start(alice)
     alice.get_received()
     for _ in range(game.PROGRESS_LIMIT.burst + 5):
         alice.emit("progress", {"progress": 10})
@@ -576,7 +692,9 @@ class HeldSockets:
         thread.start()
         self.threads.append(thread)
         deadline = time.monotonic() + 2
-        while not result and self.limits.total == before and time.monotonic() < deadline:
+        while not result and self.limits.total == before:
+            if time.monotonic() > deadline:
+                raise AssertionError("connection was neither counted nor refused")
             time.sleep(0.001)
         return result[0] if result else 200
 
