@@ -2,6 +2,10 @@ name: CI/CD
 
 # Pull requests run the tests. Pushes to main run the tests, then deploy the
 # server to the VPS and the client to Cloudflare.
+#
+# Actions are pinned to commit SHAs (Dependabot keeps them updated), npm never
+# runs install scripts, and each deploy job only gets the one secret it needs
+# from the "production" environment, which only main can use.
 on:
   push:
     branches: [main]
@@ -9,7 +13,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # never cancel a running deploy on main
+  # runs on main wait for each other, a deploy is never cancelled halfway
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -24,8 +28,10 @@ jobs:
       run:
         working-directory: server
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
           cache: pip
@@ -43,13 +49,15 @@ jobs:
       run:
         working-directory: client
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: client/package-lock.json
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run lint
       - run: npm run build
 
@@ -62,24 +70,26 @@ jobs:
       run:
         working-directory: client
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
           cache: pip
           cache-dependency-path: server/requirements*.txt
       - run: pip install -r ../server/requirements.txt
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: client/package-lock.json
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       # uses the Google Chrome that comes with the ubuntu runner image
       - run: npx playwright test
         env:
           PYTHON: python
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: playwright-report
@@ -88,20 +98,16 @@ jobs:
             client/test-results
           retention-days: 7
 
-  deploy:
-    name: Deploy
+  # Runs no third-party code, so nothing else can read the SSH key.
+  deploy-server:
+    name: Deploy server
     needs: [e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    concurrency:
-      group: deploy
-      cancel-in-progress: false
+    timeout-minutes: 10
+    environment: production
     steps:
-      - uses: actions/checkout@v7
-
-      # server first, so the new client never talks to an old server
-      - name: Deploy server to the VPS
+      - name: Deploy to the VPS
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
@@ -113,20 +119,34 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           # the key can only run deploy/vps-deploy.sh, which deploys this commit
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@$VPS_HOST" "$GITHUB_SHA"
+          rm -f ~/.ssh/deploy_key
+      - name: Check the server
+        run: curl --fail --silent --show-error --retry 5 --retry-all-errors https://kaplumbaga-api.eren.sh/healthz
 
-      - uses: actions/setup-node@v7
+  # Deploys after the server, so the new client never talks to an old server.
+  deploy-client:
+    name: Deploy client
+    needs: [deploy-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: client/package-lock.json
-      - run: npm ci
-        working-directory: client
-      - name: Deploy client to Cloudflare
+      - run: npm ci --ignore-scripts
+      - name: Deploy to Cloudflare
         run: npm run deploy
-        working-directory: client
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-      - name: Check production
-        run: curl --fail --silent --show-error --retry 5 --retry-all-errors https://kaplumbaga-api.eren.sh/healthz
+      - name: Check the site
+        run: curl --fail --silent --show-error --retry 5 --retry-all-errors --output /dev/null https://kaplumbaga.eren.sh/
