@@ -9,14 +9,26 @@ from werkzeug.test import EnvironBuilder
 
 import game
 
+# special characters, built with chr() so the source shows what they are
+NEWLINE = chr(0x0A)
+BELL = chr(0x07)
+LINE_SEPARATOR = chr(0x2028)
+RIGHT_TO_LEFT_OVERRIDE = chr(0x202E)
+ZERO_WIDTH_SPACE = chr(0x200B)
+ZWNJ = chr(0x200C)
+ZWJ = chr(0x200D)
+MAN, WOMAN, GIRL = chr(0x1F468), chr(0x1F469), chr(0x1F467)
+
 
 def reset_state():
-    for state in (game.ROOM_LIST, game.PLAYER_ROOMS, game.CONNECTED_AT,
+    for state in (game.ROOM_LIST, game.PLAYER_ROOMS, game.LAST_ACTIVE, game.ROOMLESS_SINCE,
                   game.connection_limits.per_client):
         state.clear()
     game.connection_limits.total = 0
-    game.clock_started = False
-    for limiter in (game.PROGRESS_LIMIT, game.ACTION_LIMIT, game.CONNECT_LIMIT):
+    game.clock_thread = None
+    game.next_cleanup = 0
+    for limiter in (game.PROGRESS_LIMIT, game.FINISH_LIMIT, game.ACTION_LIMIT,
+                    game.CONNECT_LIMIT):
         limiter.clear()
 
 
@@ -33,15 +45,30 @@ def no_typing_speed_check(monkeypatch):
     monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 0)
 
 
+class FakeThread:
+    def is_alive(self):
+        return True
+
+
 @pytest.fixture(autouse=True)
 def background_tasks(monkeypatch):
     """No real threads: tests run the room clock with tick(). Returns the
-    functions the server tried to start in the background."""
+    functions the server started in the background."""
     started = []
+
+    def start_background_task(target, *args):
+        started.append(target)
+        return FakeThread()
+
     monkeypatch.setattr(game, "COUNTDOWN_SECONDS", 0)
-    monkeypatch.setattr(game.socketio, "start_background_task",
-                        lambda target, *args: started.append(target))
+    monkeypatch.setattr(game.socketio, "start_background_task", start_background_task)
     return started
+
+
+@pytest.fixture(autouse=True)
+def no_connections(monkeypatch):
+    """Test clients have no engine.io connection, tests that need some fake them."""
+    monkeypatch.setattr(game, "open_connections", lambda: {})
 
 
 def start(client):
@@ -74,12 +101,13 @@ def sid_of(username, room="abc12"):
 
 
 def events(client, name):
+    """First argument of every message called `name` the client got."""
     return [msg["args"][0] if msg["args"] else None
             for msg in client.get_received() if msg["name"] == name]
 
 
 def texts(client):
-    return [data["text"] for data in events(client, "load_text")]
+    return events(client, "load_text")
 
 
 def finishes(client):
@@ -93,6 +121,7 @@ def test_join_broadcasts_players():
     state = events(alice, "room_update")[-1]
     assert sorted(p["username"] for p in state["players"].values()) == ["alice", "bob"]
     assert state["status"] == "waiting"
+    assert state["room"] == "abc12"
     assert events(bob, "room_update")[-1] == state
 
 
@@ -103,12 +132,12 @@ def test_join_rejects_bad_room_id():
 
 
 def test_room_id_with_a_newline_never_makes_a_separate_room():
-    # with re.match and $, "abc\n" was a different room than "abc"
+    # with re.match and $, "abc" + newline was a different room than "abc"
     connect("alice", room="abc")
-    connect("bob", room="abc\n")
+    connect("bob", room="abc" + NEWLINE)
     assert list(game.ROOM_LIST) == ["abc"]
     client = game.socketio.test_client(game.app)
-    assert client.emit("join", {"room_id": "ab\nc", "username": "x"}, callback=True) == {
+    assert client.emit("join", {"room_id": "ab" + NEWLINE + "c", "username": "x"}, callback=True) == {
         "ok": False, "error": "invalid room id"}
 
 
@@ -133,6 +162,13 @@ def test_events_without_data_do_not_crash(event, caplog):
     assert not [r for r in caplog.records if r.levelname == "ERROR"]
 
 
+@pytest.mark.parametrize("event", ["join", "set_language", "progress", "game_start", "leave"])
+def test_events_with_extra_arguments_do_not_crash(event, caplog):
+    client = connect("alice")
+    client.emit(event, {"room_id": "abc12", "progress": 5, "language": "de"}, "extra", 42)
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
 def test_join_with_a_non_string_language_uses_the_default():
     client = game.socketio.test_client(game.app)
     data = {"room_id": "abc12", "username": "alice", "language": ["tr"]}
@@ -147,19 +183,36 @@ def test_username_is_trimmed_and_capped():
     assert player["username"] == "x" * game.MAX_USERNAME_LENGTH
 
 
-def test_username_keeps_joiners_of_emoji_and_words():
-    # zero width joiner builds 👨‍👩‍👧, zero width non-joiner is part of Persian words
-    connect("\U0001f468\u200d\U0001f469\u200d\U0001f467")
-    connect("\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645")
-    assert set(names()) == {"\U0001f468\u200d\U0001f469\u200d\U0001f467",
-                            "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"}
+def test_username_keeps_joiners_inside_emoji_and_words():
+    family = MAN + ZWJ + WOMAN + ZWJ + GIRL
+    persian = "".join(map(chr, [0x0645, 0x06CC, 0x200C, 0x062E, 0x0648, 0x0627, 0x0647, 0x0645]))
+    connect(family)
+    connect(persian)
+    assert set(names()) == {family, persian}
+
+
+def test_username_drops_stray_joiners():
+    # at the edges or repeated, a joiner joins nothing and only hides
+    assert game.clean_username(ZWJ + "alice" + ZWNJ) == "alice"
+    assert game.clean_username("ali" + ZWJ + ZWJ + ZWNJ + "ce") == "ali" + ZWJ + "ce"
+    assert game.clean_username("bob " + ZWJ + " cat") == "bob cat"
+    # cut after 24 characters right behind a joiner
+    assert game.clean_username("x" * 23 + ZWJ + "y") == "x" * 23
+    # nothing visible left
+    assert game.clean_username(ZWJ + ZWNJ + ZWJ) == "player"
+
+
+def test_names_that_look_the_same_get_a_number():
+    connect("alice")
+    connect("ali" + ZWJ + "ce")
+    assert names() == ["alice", "ali" + ZWJ + "ce 2"]
 
 
 def test_username_control_and_direction_characters_are_removed():
     # a line break could fake a log line, U+202E reverses the text others see
-    connect("ali\nce‮​\x07  ")
+    connect("ali" + NEWLINE + "ce" + RIGHT_TO_LEFT_OVERRIDE + ZERO_WIDTH_SPACE + BELL + "  ")
     assert names() == ["ali ce"]
-    connect("‮ ")
+    connect(RIGHT_TO_LEFT_OVERRIDE + LINE_SEPARATOR)
     assert names() == ["ali ce", "player"]
 
 
@@ -181,7 +234,7 @@ def test_disconnect_notifies_room_and_cleans_up():
     state = events(alice, "room_update")[-1]
     assert [p["username"] for p in state["players"].values()] == ["alice"]
     alice.disconnect()
-    assert game.ROOM_LIST == {} and game.PLAYER_ROOMS == {}
+    assert game.ROOM_LIST == {} and game.PLAYER_ROOMS == {} and game.LAST_ACTIVE == {}
 
 
 def test_leave_only_affects_own_room():
@@ -202,6 +255,10 @@ def test_joining_another_room_leaves_the_old_one():
     bob.emit("join", {"room_id": "room2", "username": "bob"})
     state = events(alice, "room_update")[-1]
     assert [p["username"] for p in state["players"].values()] == ["alice"]
+    # and no longer gets the old room's messages
+    bob.get_received()
+    start(alice)
+    assert texts(bob) == []
 
 
 def test_full_game_flow():
@@ -231,6 +288,19 @@ def test_full_game_flow():
     assert all(p["progress"] == 0 for p in game.ROOM_LIST["abc12"]["players"].values())
 
 
+def test_race_text_is_the_first_argument():
+    # browser tabs still running the previous client read the text from the
+    # first argument, the version and room come after it
+    alice = connect("alice")
+    alice.get_received()
+    start(alice)
+    (message,) = [msg for msg in alice.get_received() if msg["name"] == "load_text"]
+    text, version, room = message["args"]
+    assert text == game.TEXTS["en"]
+    assert version == game.ROOM_LIST["abc12"]["version"]
+    assert room == "abc12"
+
+
 def test_progress_is_validated():
     alice = connect("alice")
     alice.emit("progress", {"progress": 100})  # game not started
@@ -256,8 +326,8 @@ def test_non_finite_progress_is_rejected(value):
 
 
 def test_room_named_after_a_socket_id_does_not_reach_that_player():
-    # every socket is also in a private socket.io room named after its sid,
-    # and sids are broadcast to room members as player ids
+    # messages go to the players of a room, a room code that equals someone's
+    # sid doesn't make them a player
     connect("alice")
     victim = connect("victim", room="room2")
     victim_sid = sid_of("victim", room="room2")
@@ -285,6 +355,25 @@ def test_players_who_joined_mid_race_cannot_finish():
     assert status() == "playing" and game.ROOM_LIST["abc12"]["winner"] is None
     alice.emit("progress", {"progress": 100})
     assert game.ROOM_LIST["abc12"]["winner"] == "alice"
+
+
+def test_a_player_joining_as_the_race_starts_does_not_get_its_text(monkeypatch):
+    # The text is queued under the lock and sent after it. A player who joins
+    # in between is in the room by then, but isn't racing.
+    queued = []
+    send = game.send
+    monkeypatch.setattr(game, "send", queued.append)
+    alice = connect("alice")
+    alice.emit("game_start")
+    game.tick()  # text queued, not sent yet
+    carol = connect("carol")
+    for outbox in queued:
+        send(outbox)
+    assert texts(alice) == [game.TEXTS["en"]]
+    received = carol.get_received()
+    assert [msg for msg in received if msg["name"] == "load_text"] == []
+    updates = [msg["args"][0] for msg in received if msg["name"] == "room_update"]
+    assert updates[-1]["status"] == "playing"
 
 
 def test_race_ends_when_everyone_racing_has_left():
@@ -337,60 +426,119 @@ def test_races_do_not_start_threads(background_tasks):
     assert background_tasks == [game.room_clock]
 
 
-def test_progress_cannot_outrun_human_typing(monkeypatch, clock):
-    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 20)
-    length = len(game.TEXTS["en"])
+def test_room_clock_starts_again_after_it_failed_or_stopped(monkeypatch):
+    attempts = []
+
+    def failing_start(target, *args):
+        attempts.append(target)
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(game.socketio, "start_background_task", failing_start)
+    game.socketio.test_client(game.app)
+    assert game.clock_thread is None
+    started = []
+    monkeypatch.setattr(game.socketio, "start_background_task",
+                        lambda target, *args: started.append(target) or FakeThread())
+    game.socketio.test_client(game.app)
+    assert attempts == [game.room_clock] and started == [game.room_clock]
+
+    class StoppedThread:
+        def is_alive(self):
+            return False
+
+    game.clock_thread = StoppedThread()
+    connect("alice")
+    assert started == [game.room_clock, game.room_clock]
+
+
+def test_human_typing_speed_is_fine(monkeypatch, clock):
+    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 25)
+    text = game.TEXTS["en"]
     alice = connect("alice")
     start(alice)
-
-    def progress():
-        return game.ROOM_LIST["abc12"]["players"][sid_of("alice")]["progress"]
-
-    # a devtools one-liner right as the text appears
-    alice.emit("progress", {"progress": 99})
-    assert progress() == pytest.approx(game.HEAD_START_CHARS / length * 100)
-    clock.advance(1)
-    alice.emit("progress", {"progress": 99})
-    assert progress() == pytest.approx((game.HEAD_START_CHARS + 20) / length * 100)
-    assert status() == "playing"
+    # 15 characters a second, a very fast typist
+    for typed in range(1, len(text) + 1):
+        clock.advance(1 / 15)
+        game.PROGRESS_LIMIT.clear()
+        alice.emit("progress", {"progress": typed / len(text) * 100})
+    assert status() == "finished" and game.ROOM_LIST["abc12"]["winner"] == "alice"
 
 
-def test_early_finish_counts_once_it_is_plausible(monkeypatch, clock):
-    # the client sends nothing after the last word, so a finish that comes
-    # too early must not be lost
-    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 20)
-    plausible_after = (len(game.TEXTS["en"]) - game.HEAD_START_CHARS) / 20
+def test_typing_faster_than_a_person_takes_you_out_of_the_race(monkeypatch, clock):
+    # a script used to win by sending 100 once and waiting
+    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 25)
     alice = connect("alice")
     bob = connect("bob")
     start(alice)
+    bob.get_received()
     alice.emit("progress", {"progress": 100})
     assert status() == "playing"
-    clock.advance(1)
-    bob.emit("progress", {"progress": 100})  # later claim
-    clock.advance(plausible_after - 1.5)
-    game.tick()
-    assert status() == "playing"
-    bob.get_received()
-    clock.advance(1)
-    game.tick()
-    assert status() == "finished"
-    assert finishes(bob) == [{"winner": "alice", "winner_id": sid_of("alice")}]
-    assert game.ROOM_LIST["abc12"]["players"][sid_of("alice")]["progress"] == 100
+    state = events(bob, "room_update")[-1]
+    assert state["players"][sid_of("alice")]["too_fast"] is True
+    clock.advance(game.RACE_SECONDS - 1)
+    alice.emit("progress", {"progress": 100})
+    assert game.ROOM_LIST["abc12"]["winner"] is None
+    bob.emit("progress", {"progress": 100})
+    assert game.ROOM_LIST["abc12"]["winner"] == "bob"
+    # a new race gives everyone a new chance
+    start(alice)
+    assert game.ROOM_LIST["abc12"]["players"][sid_of("alice")]["too_fast"] is False
 
 
-def test_finish_messages_are_rate_limited_too(monkeypatch, clock):
-    # 100 used to skip the rate limit, with the speed check it no longer ends
-    # the race, so every one of them was broadcast
-    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 20)
+def test_race_ends_when_the_only_racer_is_out(monkeypatch, clock):
+    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 25)
+    alice = connect("alice")
+    start(alice)
+    alice.get_received()
+    alice.emit("progress", {"progress": 100})
+    assert finishes(alice) == [{"winner": None, "winner_id": None}]
+
+
+def test_finish_floods_never_take_the_lock(monkeypatch):
+    alice = connect("alice")
+    connect("bob")
+    start(alice)
+
+    class CountingLock:
+        def __init__(self, lock):
+            self.lock, self.entered = lock, 0
+
+        def __enter__(self):
+            self.entered += 1
+            return self.lock.__enter__()
+
+        def __exit__(self, *exc):
+            return self.lock.__exit__(*exc)
+
+        def locked(self):
+            return self.lock.locked()
+
+    counting = CountingLock(game.state_lock)
+    monkeypatch.setattr(game, "state_lock", counting)
+    for _ in range(1000):
+        alice.emit("progress", {"progress": 100})
+    assert counting.entered <= game.FINISH_LIMIT.burst
+
+
+def test_winner_progress_carries_the_finish_version():
+    # with the version from before the finish, an earlier 99% message
+    # arriving late was accepted and pulled the turtle back
     alice = connect("alice")
     bob = connect("bob")
     start(alice)
+    alice.emit("progress", {"progress": 99})
     bob.get_received()
-    for _ in range(1000):
-        alice.emit("progress", {"progress": 100})
-    assert len(events(bob, "progress_percentage")) <= game.PROGRESS_LIMIT.burst
-    assert status() == "playing"
-    assert sid_of("alice") in game.ROOM_LIST["abc12"]["claims"]
+    alice.emit("progress", {"progress": 100})
+    received = {msg["name"]: msg["args"][0] for msg in bob.get_received()}
+    earlier = game.ROOM_LIST["abc12"]["version"]
+    assert received["progress_percentage"]["progress"] == 100
+    assert received["progress_percentage"]["version"] == received["finish_game"]["version"] == earlier
+    assert received["finish_game"]["version"] > texts_version(alice)
+
+
+def texts_version(client):
+    """Version the race text came with, from the server's log of the room."""
+    return game.ROOM_LIST["abc12"]["version"] - 1
 
 
 def test_messages_are_never_sent_while_holding_the_state_lock(monkeypatch):
@@ -443,14 +591,27 @@ def test_messages_carry_increasing_room_versions():
     # sent outside the lock, messages can arrive out of order: clients drop
     # anything older than the newest version they have seen
     alice = connect("alice")
-    bob = connect("bob")
+    connect("bob")
     start(alice)
     alice.emit("progress", {"progress": 100})
-    versions = [msg["args"][0]["version"] for msg in alice.get_received()
-                if msg["name"] in ("room_update", "load_text", "finish_game")]
+    versions = []
+    for msg in alice.get_received():
+        if msg["name"] == "load_text":
+            versions.append(msg["args"][1])
+        elif msg["name"] in ("room_update", "finish_game"):
+            versions.append(msg["args"][0]["version"])
     assert len(versions) >= 5
     assert versions == sorted(versions)
     assert len(set(versions)) >= 4
+
+
+def test_room_update_copies_the_players():
+    # queued under the lock and sent after it, the message must not change
+    # with the room in between
+    connect("alice")
+    message = game.room_state("abc12")
+    game.ROOM_LIST["abc12"]["players"][sid_of("alice")]["progress"] = 77
+    assert message["players"][sid_of("alice")]["progress"] == 0
 
 
 def test_events_of_a_client_are_handled_in_order():
@@ -458,14 +619,65 @@ def test_events_of_a_client_are_handled_in_order():
     assert game.socketio.server.async_handlers is False
 
 
-def test_sockets_without_a_room_are_closed(clock):
-    idle = game.socketio.test_client(game.app)
-    player = connect("alice")
+@pytest.fixture
+def connections(monkeypatch):
+    """Fake engine.io connections: eio sid -> socket.io sid. Returns them and
+    the ones the server closed."""
+    open_ = {}
+    closed = []
+    monkeypatch.setattr(game, "open_connections", lambda: dict(open_))
+    monkeypatch.setattr(game.socketio.server.eio, "disconnect", closed.append)
+    return open_, closed
+
+
+def test_connections_without_a_room_are_closed(clock, connections):
+    open_, closed = connections
+    alice = connect("alice")
+    open_.update({"eio-alice": sid_of("alice"), "eio-raw": None, "eio-lobby": "not-in-a-room"})
+    game.close_idle_connections(clock.now)
     clock.advance(game.ROOMLESS_SECONDS + 1)
+    game.close_idle_connections(clock.now)
+    # without a socket.io connect, or connected without joining
+    assert sorted(closed) == ["eio-lobby", "eio-raw"]
+    assert alice.is_connected()
+
+
+def test_leaving_and_joining_again_is_not_closed(clock, connections):
+    open_, closed = connections
+    alice = connect("alice")
+    open_["eio-alice"] = sid_of("alice")
+    clock.advance(game.ROOMLESS_SECONDS + 10)  # connected for a while
+    game.close_idle_connections(clock.now)
+    alice.emit("leave")
+    game.close_idle_connections(clock.now)  # caught between leave and join
+    alice.emit("join", {"room_id": "abc12", "username": "alice"})
+    clock.advance(1)
+    game.close_idle_connections(clock.now)
+    assert closed == []
+
+
+def test_forgotten_tabs_are_closed(clock, connections):
+    open_, closed = connections
+    connect("alice")
+    bob = connect("bob")
+    open_.update({"eio-alice": sid_of("alice"), "eio-bob": sid_of("bob")})
+    clock.advance(game.IDLE_SECONDS - 60)
+    bob.emit("set_language", {"language": "de"})  # bob still plays
+    clock.advance(61)
+    game.close_idle_connections(clock.now)
+    assert closed == ["eio-alice"]
+
+
+def test_idle_connections_are_checked_once_a_second(monkeypatch, clock):
+    checks = []
+    monkeypatch.setattr(game, "close_idle_connections", checks.append)
+    for _ in range(10):
+        game.tick()
+        clock.advance(0.1)
+    assert len(checks) == 1
+    clock.advance(0.1)
     game.tick()
-    assert not idle.is_connected()
-    assert player.is_connected()
-    assert list(game.CONNECTED_AT) == [sid_of("alice")]
+    assert len(checks) == 2
 
 
 @pytest.fixture
@@ -499,7 +711,7 @@ def test_countdown_comes_before_the_text(countdown):
     game.tick()
     received = bob.get_received()
     assert [msg["name"] for msg in received] == ["load_text", "room_update"]
-    assert received[0]["args"][0]["text"] == game.TEXTS["en"]
+    assert received[0]["args"][0] == game.TEXTS["en"]
     assert received[1]["args"][0]["status"] == "playing"
     assert "starts_in" not in received[1]["args"][0]
 
@@ -562,9 +774,15 @@ def test_every_language_has_a_typable_text():
     assert set(game.TEXTS) == {"tr", "en", "pt", "de", "fr", "es"}
     for text in game.TEXTS.values():
         # the client splits on single spaces and matches word by word
-        assert text == text.strip() and "  " not in text and "\n" not in text
+        assert text == text.strip() and "  " not in text and NEWLINE not in text
         # the client compares NFC normalized input
         assert unicodedata.is_normalized("NFC", text)
+
+
+def test_source_has_no_invisible_characters():
+    # an editor can silently drop or add them
+    source = (pathlib.Path(__file__).parent / "game.py").read_text(encoding="utf-8")
+    assert [hex(ord(ch)) for ch in source if unicodedata.category(ch) == "Cf"] == []
 
 
 class FakeTime:
@@ -750,18 +968,15 @@ def test_ipv6_clients_count_per_64(monkeypatch, sockets):
     assert sockets.hold("2001:db8:1:3::1") == 200
 
 
-def test_client_key():
+def test_client_key(monkeypatch):
     environ = {"REMOTE_ADDR": "172.19.0.3", "HTTP_CF_CONNECTING_IP": "203.0.113.7"}
     # the header is ignored unless a trusted proxy sets it
     assert game.client_key(environ) == "172.19.0.3"
-    game.TRUSTED_IP_HEADER, trusted = "CF-Connecting-IP", game.TRUSTED_IP_HEADER
-    try:
-        assert game.client_key(environ) == "203.0.113.7"
-        assert game.client_key({**environ, "HTTP_CF_CONNECTING_IP": "::ffff:203.0.113.7"}) == "203.0.113.7"
-        assert game.client_key({**environ, "HTTP_CF_CONNECTING_IP": "2001:db8::1"}) == "2001:db8::/64"
-        assert game.client_key({"REMOTE_ADDR": "172.19.0.3"}) == "172.19.0.3"
-    finally:
-        game.TRUSTED_IP_HEADER = trusted
+    monkeypatch.setattr(game, "TRUSTED_IP_HEADER", "CF-Connecting-IP")
+    assert game.client_key(environ) == "203.0.113.7"
+    assert game.client_key({**environ, "HTTP_CF_CONNECTING_IP": "::ffff:203.0.113.7"}) == "203.0.113.7"
+    assert game.client_key({**environ, "HTTP_CF_CONNECTING_IP": "2001:db8::1"}) == "2001:db8::/64"
+    assert game.client_key({"REMOTE_ADDR": "172.19.0.3"}) == "172.19.0.3"
 
 
 def test_socket_limit_leaves_gunicorn_threads_for_health_checks():

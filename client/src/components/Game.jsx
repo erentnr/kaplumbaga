@@ -29,18 +29,18 @@ const Race = ({socket, roomID, onFatalError}) => {
 
   useEffect(() => {
     // The server sends messages after releasing its lock, so they can arrive
-    // out of order. Each carries the room version it was made from, drop
-    // anything older than what was already seen.
+    // out of order. Each carries its room and the room version it was made
+    // from, drop anything older than what was already seen.
     let latestVersion = 0
-    const isStale = (data) => {
-      if (data.version < latestVersion) return true
-      latestVersion = data.version
+    const isStale = (room, version) => {
+      if (room !== roomID || version < latestVersion) return true
+      latestVersion = version
       return false
     }
 
     // players, game status, winner and text language of the room
     const onRoomUpdate = (state) => {
-      if (isStale(state)) return
+      if (isStale(state.room, state.version)) return
       setCompetitors(state.players)
       setStatus(state.status)
       setWinner(state.winner)
@@ -58,9 +58,9 @@ const Race = ({socket, roomID, onFatalError}) => {
       }
     }
     // get the text sent from server, reset typing state for the new game
-    const onLoadText = (data) => {
-      if (isStale(data)) return
-      setRandomText(data.text)
+    const onLoadText = (text, version, room) => {
+      if (isStale(room, version)) return
+      setRandomText(text)
       setCurrent(0)
       setUserInput('')
       setWinner(null)
@@ -69,7 +69,7 @@ const Race = ({socket, roomID, onFatalError}) => {
     }
     // get current progress of a competitor
     const onProgress = (data) => {
-      if (isStale(data)) return
+      if (isStale(data.room, data.version)) return
       setCompetitors(
         prev => ({
           ...prev,
@@ -81,7 +81,7 @@ const Race = ({socket, roomID, onFatalError}) => {
       )
     }
     const onFinish = (data) => {
-      if (isStale(data)) return
+      if (isStale(data.room, data.version)) return
       setStatus('finished')
       setWinner(data.winner)
       setWinnerID(data.winner_id)
@@ -180,14 +180,18 @@ const Race = ({socket, roomID, onFatalError}) => {
   }
 
   const isRacing = status === 'countdown' || status === 'playing'
+  // the server takes out a player who types faster than any person, until the next race
+  const tooFast = competitors[socket.id]?.too_fast
   const secondsLeft = countdownEnd === null ? 0 : Math.max(0, Math.ceil((countdownEnd - now) / 1000))
 
   let message
-  if (status === 'finished' && !winner) {
-    message = 'Race over, nobody finished.'
-  } else if (status === 'finished') {
+  if (status === 'finished' && winner) {
     // the id tells apart players with the same name
     message = winnerID === socket.id ? 'You won!' : `${winner} won!`
+  } else if (tooFast && (status === 'playing' || status === 'finished')) {
+    message = "Too fast to be human, you're out of this race."
+  } else if (status === 'finished') {
+    message = 'Race over, nobody finished.'
   } else if (status === 'countdown') {
     message = 'Get ready!'
   } else if (status === 'playing' && !randomText) {
@@ -243,7 +247,7 @@ const Race = ({socket, roomID, onFatalError}) => {
             ref={inputRef}
             value={userInput}
             onChange={handleChange}
-            disabled={status !== 'playing' || !randomText}
+            disabled={status !== 'playing' || !randomText || tooFast}
             autoCapitalize="off"
             autoComplete="off"
             autoCorrect="off"
