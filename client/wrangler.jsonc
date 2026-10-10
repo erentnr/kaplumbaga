@@ -7,7 +7,9 @@
     "directory": "./dist",
     "not_found_handling": "single-page-application"
   },
-  "routes": [
-    { "pattern": "kaplumbaga.eren.sh", "custom_domain": true }
-  ]
+
+  // The custom domain kaplumbaga.eren.sh is attached once, outside this file,
+  // so deploys never touch it and the CI token needs no zone access. To attach
+  // it again: npx wrangler deploy --domain kaplumbaga.eren.sh
+  "workers_dev": false
 }
