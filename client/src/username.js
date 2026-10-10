@@ -1,4 +1,4 @@
-import { randomInt } from './random'
+import { randomInt, randomRoomCode } from './random'
 
 // returns the saved username, creates a random one on the first visit
 export const getUsername = () => {
@@ -12,4 +12,16 @@ export const getUsername = () => {
 
 export const saveUsername = (username) => {
   localStorage.setItem("username", username)
+}
+
+// Same through reloads and reconnects of this tab, different in another tab.
+// The server uses it to replace the tab's old connection instead of counting
+// a second player.
+export const getPlayerId = () => {
+  let id = sessionStorage.getItem("player_id")
+  if (!id) {
+    id = randomRoomCode(16)
+    sessionStorage.setItem("player_id", id)
+  }
+  return id
 }

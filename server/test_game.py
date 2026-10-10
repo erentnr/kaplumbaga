@@ -21,12 +21,10 @@ MAN, WOMAN, GIRL = chr(0x1F468), chr(0x1F469), chr(0x1F467)
 
 
 def reset_state():
-    for state in (game.ROOM_LIST, game.PLAYER_ROOMS, game.LAST_ACTIVE, game.ROOMLESS_SINCE,
-                  game.connection_limits.per_client):
+    for state in (game.ROOM_LIST, game.PLAYER_ROOMS, game.connection_limits.per_client):
         state.clear()
     game.connection_limits.total = 0
     game.clock_thread = None
-    game.next_cleanup = 0
     for limiter in (game.PROGRESS_LIMIT, game.FINISH_LIMIT, game.ACTION_LIMIT,
                     game.CONNECT_LIMIT):
         limiter.clear()
@@ -37,12 +35,6 @@ def clean_state():
     reset_state()
     yield
     reset_state()
-
-
-@pytest.fixture(autouse=True)
-def no_typing_speed_check(monkeypatch):
-    """Tests send progress instantly, the typing speed check has its own tests."""
-    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 0)
 
 
 class FakeThread:
@@ -65,12 +57,6 @@ def background_tasks(monkeypatch):
     return started
 
 
-@pytest.fixture(autouse=True)
-def no_connections(monkeypatch):
-    """Test clients have no engine.io connection, tests that need some fake them."""
-    monkeypatch.setattr(game, "open_connections", lambda: {})
-
-
 def start(client):
     """Press Start and let the room clock end the (zero second) countdown."""
     reply = client.emit("game_start", callback=True)
@@ -83,7 +69,7 @@ def connect(username, room="abc12", language=None):
     data = {"room_id": room, "username": username}
     if language:
         data["language"] = language
-    assert client.emit("join", data, callback=True) == {"ok": True}
+    assert client.emit("join", data, callback=True)["ok"] is True
     return client
 
 
@@ -141,6 +127,14 @@ def test_room_id_with_a_newline_never_makes_a_separate_room():
         "ok": False, "error": "invalid room id"}
 
 
+def test_join_reply_has_the_room_as_the_server_spells_it():
+    # clients compare the room of every message with it, a URL like
+    # /play/abc%0A would otherwise never match
+    client = game.socketio.test_client(game.app)
+    reply = client.emit("join", {"room_id": " Abc12" + NEWLINE, "username": "x"}, callback=True)
+    assert reply == {"ok": True, "room": "abc12"}
+
+
 def test_room_codes_are_not_case_sensitive():
     # phone keyboards capitalize the first letter
     connect("alice", room="xk3mp")
@@ -172,7 +166,7 @@ def test_events_with_extra_arguments_do_not_crash(event, caplog):
 def test_join_with_a_non_string_language_uses_the_default():
     client = game.socketio.test_client(game.app)
     data = {"room_id": "abc12", "username": "alice", "language": ["tr"]}
-    assert client.emit("join", data, callback=True) == {"ok": True}
+    assert client.emit("join", data, callback=True) == {"ok": True, "room": "abc12"}
     assert game.ROOM_LIST["abc12"]["language"] == game.DEFAULT_LANGUAGE
 
 
@@ -202,6 +196,20 @@ def test_username_drops_stray_joiners():
     assert game.clean_username(ZWJ + ZWNJ + ZWJ) == "player"
 
 
+@pytest.mark.parametrize("blank", [0x034F, 0x115F, 0x1160, 0x17B4, 0x2800, 0x3164, 0xFFA0])
+def test_blank_characters_are_dropped(blank):
+    # characters that draw nothing make invisible names, or names that look
+    # like someone else's
+    assert game.clean_username(chr(blank) * 3) == "player"
+    assert game.clean_username("ali" + chr(blank) + "ce") == "alice"
+
+
+def test_a_name_needs_a_visible_character():
+    combining_acute = chr(0x0301)
+    assert game.clean_username(combining_acute * 3) == "player"
+    assert game.clean_username("e" + combining_acute) == unicodedata.normalize("NFC", "e" + combining_acute)
+
+
 def test_names_that_look_the_same_get_a_number():
     connect("alice")
     connect("ali" + ZWJ + "ce")
@@ -226,6 +234,39 @@ def test_duplicate_names_in_a_room_get_a_number():
     assert "x" * (game.MAX_USERNAME_LENGTH - 2) + " 2" in names()
 
 
+def test_a_reconnecting_tab_keeps_its_name():
+    # the old connection stays in the room until its ping timeout
+    connect("bob")
+    old = game.socketio.test_client(game.app)
+    old.emit("join", {"room_id": "abc12", "username": "alice", "player_id": "tab-12345678"})
+    new = game.socketio.test_client(game.app)
+    new.emit("join", {"room_id": "abc12", "username": "alice", "player_id": "tab-12345678"})
+    assert names() == ["alice", "bob"]
+    assert game.PLAYER_ROOMS.get(old.eio_sid) is None
+    # another tab of the same person is another player
+    other = game.socketio.test_client(game.app)
+    other.emit("join", {"room_id": "abc12", "username": "alice", "player_id": "tab-87654321"})
+    assert names() == ["alice", "alice 2", "bob"]
+
+
+def test_a_reconnecting_tab_that_was_alone_keeps_the_room():
+    old = game.socketio.test_client(game.app)
+    old.emit("join", {"room_id": "abc12", "username": "alice", "player_id": "tab-12345678"})
+    new = game.socketio.test_client(game.app)
+    reply = new.emit("join", {"room_id": "abc12", "username": "alice", "player_id": "tab-12345678"},
+                     callback=True)
+    assert reply == {"ok": True, "room": "abc12"} and names() == ["alice"]
+
+
+@pytest.mark.parametrize("player_id", ["short", "x" * 65, "has spaces in it", ["tab-12345678"], 12345678])
+def test_bad_player_ids_are_ignored(player_id):
+    first = game.socketio.test_client(game.app)
+    first.emit("join", {"room_id": "abc12", "username": "alice", "player_id": player_id})
+    second = game.socketio.test_client(game.app)
+    second.emit("join", {"room_id": "abc12", "username": "alice", "player_id": player_id})
+    assert names() == ["alice", "alice 2"]
+
+
 def test_disconnect_notifies_room_and_cleans_up():
     alice = connect("alice")
     bob = connect("bob")
@@ -234,7 +275,7 @@ def test_disconnect_notifies_room_and_cleans_up():
     state = events(alice, "room_update")[-1]
     assert [p["username"] for p in state["players"].values()] == ["alice"]
     alice.disconnect()
-    assert game.ROOM_LIST == {} and game.PLAYER_ROOMS == {} and game.LAST_ACTIVE == {}
+    assert game.ROOM_LIST == {} and game.PLAYER_ROOMS == {}
 
 
 def test_leave_only_affects_own_room():
@@ -434,12 +475,15 @@ def test_room_clock_starts_again_after_it_failed_or_stopped(monkeypatch):
         raise RuntimeError("can't start new thread")
 
     monkeypatch.setattr(game.socketio, "start_background_task", failing_start)
-    game.socketio.test_client(game.app)
+    alice = connect("alice")
+    alice.emit("game_start")
     assert game.clock_thread is None
     started = []
     monkeypatch.setattr(game.socketio, "start_background_task",
                         lambda target, *args: started.append(target) or FakeThread())
-    game.socketio.test_client(game.app)
+    game.tick()
+    alice.emit("progress", {"progress": 100})  # finish, so Start works again
+    alice.emit("game_start")
     assert attempts == [game.room_clock] and started == [game.room_clock]
 
     class StoppedThread:
@@ -447,51 +491,10 @@ def test_room_clock_starts_again_after_it_failed_or_stopped(monkeypatch):
             return False
 
     game.clock_thread = StoppedThread()
-    connect("alice")
+    game.tick()
+    alice.emit("progress", {"progress": 100})
+    alice.emit("game_start")
     assert started == [game.room_clock, game.room_clock]
-
-
-def test_human_typing_speed_is_fine(monkeypatch, clock):
-    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 25)
-    text = game.TEXTS["en"]
-    alice = connect("alice")
-    start(alice)
-    # 15 characters a second, a very fast typist
-    for typed in range(1, len(text) + 1):
-        clock.advance(1 / 15)
-        game.PROGRESS_LIMIT.clear()
-        alice.emit("progress", {"progress": typed / len(text) * 100})
-    assert status() == "finished" and game.ROOM_LIST["abc12"]["winner"] == "alice"
-
-
-def test_typing_faster_than_a_person_takes_you_out_of_the_race(monkeypatch, clock):
-    # a script used to win by sending 100 once and waiting
-    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 25)
-    alice = connect("alice")
-    bob = connect("bob")
-    start(alice)
-    bob.get_received()
-    alice.emit("progress", {"progress": 100})
-    assert status() == "playing"
-    state = events(bob, "room_update")[-1]
-    assert state["players"][sid_of("alice")]["too_fast"] is True
-    clock.advance(game.RACE_SECONDS - 1)
-    alice.emit("progress", {"progress": 100})
-    assert game.ROOM_LIST["abc12"]["winner"] is None
-    bob.emit("progress", {"progress": 100})
-    assert game.ROOM_LIST["abc12"]["winner"] == "bob"
-    # a new race gives everyone a new chance
-    start(alice)
-    assert game.ROOM_LIST["abc12"]["players"][sid_of("alice")]["too_fast"] is False
-
-
-def test_race_ends_when_the_only_racer_is_out(monkeypatch, clock):
-    monkeypatch.setattr(game, "MAX_CHARS_PER_SECOND", 25)
-    alice = connect("alice")
-    start(alice)
-    alice.get_received()
-    alice.emit("progress", {"progress": 100})
-    assert finishes(alice) == [{"winner": None, "winner_id": None}]
 
 
 def test_finish_floods_never_take_the_lock(monkeypatch):
@@ -518,6 +521,19 @@ def test_finish_floods_never_take_the_lock(monkeypatch):
     for _ in range(1000):
         alice.emit("progress", {"progress": 100})
     assert counting.entered <= game.FINISH_LIMIT.burst
+
+
+def test_every_progress_update_gets_a_new_version():
+    # with the same version, an older room update arriving late could
+    # overwrite newer progress and make the turtle jump back
+    alice = connect("alice")
+    bob = connect("bob")
+    start(alice)
+    bob.get_received()
+    for progress in (10, 20, 30):
+        alice.emit("progress", {"progress": progress})
+    versions = [data["version"] for data in events(bob, "progress_percentage")]
+    assert len(versions) == 3 and versions == sorted(set(versions))
 
 
 def test_winner_progress_carries_the_finish_version():
@@ -614,70 +630,58 @@ def test_room_update_copies_the_players():
     assert message["players"][sid_of("alice")]["progress"] == 0
 
 
+class StopClock(Exception):
+    pass
+
+
+class RecordingWakeup:
+    """Stands in for clock_wakeup: records how long the clock sleeps, then stops it."""
+
+    def __init__(self):
+        self.timeouts = []
+
+    def wait(self, timeout):
+        self.timeouts.append(timeout)
+        raise StopClock
+
+    def clear(self):
+        pass
+
+    def set(self):
+        pass
+
+
+def run_clock_once(monkeypatch):
+    wakeup = RecordingWakeup()
+    monkeypatch.setattr(game, "clock_wakeup", wakeup)
+    monkeypatch.setattr(game, "log", type("Log", (), {"exception": staticmethod(lambda *a: None)}))
+    monkeypatch.setattr(game.socketio, "sleep", lambda seconds: (_ for _ in ()).throw(StopClock()))
+    with pytest.raises(StopClock):
+        game.room_clock()
+    return wakeup.timeouts[-1]
+
+
+def test_clock_sleeps_until_there_is_something_to_do(monkeypatch, clock):
+    # it used to take the lock 10 times a second, even without any room
+    assert run_clock_once(monkeypatch) is None
+    connect("alice")
+    assert run_clock_once(monkeypatch) is None  # a waiting room needs no clock
+
+
+def test_clock_sleeps_until_the_next_deadline(monkeypatch, clock):
+    monkeypatch.setattr(game, "COUNTDOWN_SECONDS", 3)
+    alice = connect("alice")
+    alice.emit("game_start")
+    assert run_clock_once(monkeypatch) == pytest.approx(3)
+    clock.advance(3)
+    game.tick()
+    clock.advance(10)
+    assert run_clock_once(monkeypatch) == pytest.approx(game.RACE_SECONDS - 10)
+
+
 def test_events_of_a_client_are_handled_in_order():
     # with async handlers every event gets its own thread, in any order
     assert game.socketio.server.async_handlers is False
-
-
-@pytest.fixture
-def connections(monkeypatch):
-    """Fake engine.io connections: eio sid -> socket.io sid. Returns them and
-    the ones the server closed."""
-    open_ = {}
-    closed = []
-    monkeypatch.setattr(game, "open_connections", lambda: dict(open_))
-    monkeypatch.setattr(game.socketio.server.eio, "disconnect", closed.append)
-    return open_, closed
-
-
-def test_connections_without_a_room_are_closed(clock, connections):
-    open_, closed = connections
-    alice = connect("alice")
-    open_.update({"eio-alice": sid_of("alice"), "eio-raw": None, "eio-lobby": "not-in-a-room"})
-    game.close_idle_connections(clock.now)
-    clock.advance(game.ROOMLESS_SECONDS + 1)
-    game.close_idle_connections(clock.now)
-    # without a socket.io connect, or connected without joining
-    assert sorted(closed) == ["eio-lobby", "eio-raw"]
-    assert alice.is_connected()
-
-
-def test_leaving_and_joining_again_is_not_closed(clock, connections):
-    open_, closed = connections
-    alice = connect("alice")
-    open_["eio-alice"] = sid_of("alice")
-    clock.advance(game.ROOMLESS_SECONDS + 10)  # connected for a while
-    game.close_idle_connections(clock.now)
-    alice.emit("leave")
-    game.close_idle_connections(clock.now)  # caught between leave and join
-    alice.emit("join", {"room_id": "abc12", "username": "alice"})
-    clock.advance(1)
-    game.close_idle_connections(clock.now)
-    assert closed == []
-
-
-def test_forgotten_tabs_are_closed(clock, connections):
-    open_, closed = connections
-    connect("alice")
-    bob = connect("bob")
-    open_.update({"eio-alice": sid_of("alice"), "eio-bob": sid_of("bob")})
-    clock.advance(game.IDLE_SECONDS - 60)
-    bob.emit("set_language", {"language": "de"})  # bob still plays
-    clock.advance(61)
-    game.close_idle_connections(clock.now)
-    assert closed == ["eio-alice"]
-
-
-def test_idle_connections_are_checked_once_a_second(monkeypatch, clock):
-    checks = []
-    monkeypatch.setattr(game, "close_idle_connections", checks.append)
-    for _ in range(10):
-        game.tick()
-        clock.advance(0.1)
-    assert len(checks) == 1
-    clock.advance(0.1)
-    game.tick()
-    assert len(checks) == 2
 
 
 @pytest.fixture

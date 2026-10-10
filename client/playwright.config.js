@@ -24,8 +24,7 @@ export default defineConfig({
         + '--bind 127.0.0.1:8000 --no-control-socket game:app',
       cwd: '../server',
       url: 'http://127.0.0.1:8000/healthz',
-      // the tests type faster than any human, turn the typing speed check off
-      env: { CORS_ORIGINS: 'http://localhost:4173', COUNTDOWN_SECONDS: '1', MAX_CHARS_PER_SECOND: '0' },
+      env: { CORS_ORIGINS: 'http://localhost:4173', COUNTDOWN_SECONDS: '1' },
       reuseExistingServer: !process.env.CI,
     },
     {

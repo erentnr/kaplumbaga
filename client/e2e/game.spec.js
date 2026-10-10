@@ -3,7 +3,7 @@ import { test as base, expect } from '@playwright/test'
 const newRoom = () => `e2e${Math.random().toString(36).slice(2, 8)}`
 
 // a player in their own browser context, like a separate device
-async function openPlayer(context, name, room, { viaHome = false, language } = {}) {
+async function openPlayer(context, name, room, { viaHome = false, language, beforeGoto } = {}) {
   await context.addInitScript(([username, lang]) => {
     try {
       localStorage.setItem('username', username)
@@ -21,6 +21,7 @@ async function openPlayer(context, name, room, { viaHome = false, language } = {
   page.on('request', (request) => requests.push(request.url()))
   const websockets = []
   page.on('websocket', (ws) => websockets.push(ws.url()))
+  if (beforeGoto) await beforeGoto(page)
 
   if (viaHome) {
     // enter through the home page so back/forward are in-app navigations
@@ -237,6 +238,39 @@ test('room codes ignore case and a pasted invite link works', async ({ joinAs, b
   await carol.page.press('.room-code-input', 'Enter')
   await carol.page.waitForURL(`**/play/${room}`)
   await expect(turtles(alice.page)).toHaveText(['alice', 'bob', 'carol'])
+})
+
+test('a room address with a trailing line break still works', async ({ joinAs }) => {
+  // the server trims the code, the client has to match its messages
+  const room = newRoom()
+  const alice = await joinAs('alice', room)
+  const bob = await joinAs('bob', `${room}%0A`)
+  await expect(turtles(bob.page)).toHaveText(['alice', 'bob'])
+  await expect(message(bob.page)).toContainText(`Room code: ${room}.`)
+  await startButton(bob.page).click()
+  await expect(words(alice.page).first()).toBeVisible()
+  await expect(words(bob.page).first()).toBeVisible()
+})
+
+test('a tab that reconnects keeps its name', async ({ joinAs }) => {
+  const room = newRoom()
+  const alice = await joinAs('alice', room)
+  const connections = []
+  const bob = await joinAs('bob', room, {
+    beforeGoto: (page) => page.routeWebSocket(/socket\.io/, (ws) => {
+      connections.push(ws)
+      // with close handlers, closing one side doesn't close the other
+      ws.onClose(() => {})
+      ws.connectToServer().onClose(() => {})
+    }),
+  })
+  await expect(turtles(alice.page)).toHaveText(['alice', 'bob'])
+  // drop the connection on the browser side only, like a phone switching
+  // networks: the server keeps the old one until its ping timeout
+  await connections[0].close()
+  await expect.poll(() => connections.length).toBe(2)
+  await expect(turtles(bob.page)).toHaveText(['alice', 'bob'])
+  await expect(turtles(alice.page)).toHaveText(['alice', 'bob'])
 })
 
 test('unknown addresses go to the home page', async ({ page }) => {

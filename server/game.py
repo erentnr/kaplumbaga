@@ -58,43 +58,29 @@ DEFAULT_LANGUAGE = "en"
 COUNTDOWN_SECONDS = float(os.environ.get("COUNTDOWN_SECONDS", 3))
 # a race nobody finishes ends after this many seconds, so the room can race again
 RACE_SECONDS = float(os.environ.get("RACE_SECONDS", 180))
-# Typing faster than the world record, ~300 words per minute, takes a player
-# out of the race, so a script has to pace itself like a person. The first
-# few characters are free, they can be typed right as the text appears.
-# 0 turns the check off (the end-to-end tests type faster than any human).
-MAX_CHARS_PER_SECOND = float(os.environ.get("MAX_CHARS_PER_SECOND", 25))
-HEAD_START_CHARS = 10
-# Connections are closed when they haven't joined a room for this long, or
-# sit in a room without doing anything for this long (a forgotten tab).
-ROOMLESS_SECONDS = float(os.environ.get("ROOMLESS_SECONDS", 30))
-IDLE_SECONDS = float(os.environ.get("IDLE_SECONDS", 30 * 60))
-# how often the room clock runs countdowns and time limits, and looks for idle connections
-CLOCK_SECONDS = 0.1
-CLEANUP_SECONDS = 1
 
 ROOM_ID_PATTERN = re.compile(r"[a-z0-9_-]{1,32}")
+# random id of a browser tab, so a reconnecting tab replaces its old connection
+PLAYER_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,64}")
 MAX_USERNAME_LENGTH = 24
 
 # room_id -> {"status": "waiting" | "countdown" | "playing" | "finished",
 #             "language": key of TEXTS,
 #             "version": increases with every change, see bump(),
-#             "players": {sid: {"username": str, "progress": float, "too_fast": bool}},
+#             "players": {sid: {"username": str, "progress": float, "player_id": str | None}},
 #             plus the race fields of race_fields()}
 ROOM_LIST = {}
 # sid -> room_id, every socket is in at most one room
 PLAYER_ROOMS = {}
-# sid -> time.monotonic() of the player's last event, for closing forgotten tabs
-LAST_ACTIVE = {}
-# Guards ROOM_LIST, PLAYER_ROOMS and LAST_ACTIVE. Never send while holding
-# it: sending to a socket that stopped answering pings closes it, and
-# engineio runs handle_disconnect in the same thread, which needs this lock.
+# Guards ROOM_LIST and PLAYER_ROOMS. Never send while holding it: sending to
+# a socket that stopped answering pings closes it, and engineio runs
+# handle_disconnect in the same thread, which needs this lock.
 state_lock = threading.Lock()
 versions = itertools.count(1)
-# engine.io session id -> time.monotonic() since it has no room, only the clock uses it
-ROOMLESS_SINCE = {}
 clock_lock = threading.Lock()
 clock_thread = None
-next_cleanup = 0
+# set when a new countdown starts, the clock sleeps until then or the next deadline
+clock_wakeup = threading.Event()
 
 
 class RateLimiter:
@@ -147,7 +133,8 @@ ACTION_LIMIT = RateLimiter(rate=1, burst=10)
 
 # Every open websocket holds one gunicorn thread until it closes. Keep the
 # total below gunicorn's --threads in the Dockerfile, so the health check
-# always gets a thread.
+# always gets a thread. A dead connection closes after engine.io's ping
+# timeout, anything more is left to Cloudflare.
 MAX_SOCKETS = int(os.environ.get("MAX_SOCKETS", 280))
 # per client, generous enough for a classroom behind one NAT address
 MAX_SOCKETS_PER_CLIENT = 30
@@ -233,25 +220,36 @@ def rate_limited(limiter):
 
 # Zero width non-joiner and joiner: needed by emoji sequences (a family of
 # three is man, joiner, woman, joiner, girl) and by Persian and Indic words.
-JOINERS = "\u200c\u200d"
+JOINERS = chr(0x200C) + chr(0x200D)
 # a joiner at the start or end of a word, or more than one in a row, joins nothing
 STRAY_JOINERS = re.compile(rf"(?<!\S)[{JOINERS}]+|[{JOINERS}]+(?!\S)|(?<=[{JOINERS}])[{JOINERS}]+")
+# characters that draw nothing although they aren't format characters:
+# combining grapheme joiner, Hangul fillers, Khmer inherent vowels, Mongolian
+# variation selectors and the blank Braille pattern
+BLANKS = {chr(code) for code in (0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180C,
+                                  0x180D, 0x180E, 0x180F, 0x2800, 0x3164, 0xFFA0)}
 
 
 def clean_username(value):
-    """Printable name: no control, line break, text direction or stray joiner characters."""
+    """Printable name: no control, line break, text direction or blank characters,
+    and at least one visible character."""
     kept = []
     for ch in unicodedata.normalize("NFC", str(value or "")):
         category = unicodedata.category(ch)
         if category in ("Cc", "Zl", "Zp"):
             kept.append(" ")  # line breaks and tabs become spaces
+        elif ch in BLANKS:
+            continue
         elif not category.startswith("C") or ch in JOINERS:
             # drops text direction and other format characters, private use, unassigned
             kept.append(ch)
     text = STRAY_JOINERS.sub("", "".join(kept))
     name = " ".join(text.split())[:MAX_USERNAME_LENGTH]
     # shortening can leave a joiner at the end
-    return STRAY_JOINERS.sub("", name).strip() or "player"
+    name = STRAY_JOINERS.sub("", name).strip()
+    # a letter, number, punctuation or symbol, not only combining marks
+    visible = any(unicodedata.category(ch)[0] in "LNPS" for ch in name)
+    return name if visible else "player"
 
 
 def looks_like(name):
@@ -276,7 +274,7 @@ def race_fields(**values):
         "starts_at": None,   # time.monotonic() when the countdown ends
         "started_at": None,  # time.monotonic() when the text was sent
         "text": None,
-        "racers": set(),     # sids that got the text and can still finish
+        "racers": set(),     # sids that got the text, only they can finish
         "winner": None,
         "winner_id": None,
     }
@@ -300,8 +298,7 @@ def room_state(room, now=None):
     message = {
         "room": room,
         # copied, the message is sent after releasing the lock
-        "players": {sid: {"username": player["username"], "progress": player["progress"],
-                          "too_fast": player["too_fast"]}
+        "players": {sid: {"username": player["username"], "progress": player["progress"]}
                     for sid, player in state["players"].items()},
         "status": state["status"],
         "winner": state["winner"],
@@ -380,37 +377,17 @@ def remove_player(user_id, outbox):
     return room
 
 
-def open_connections():
-    """engine.io session id -> socket.io sid, None before the socket.io connect."""
-    manager = socketio.server.manager
-    return {eio_sid: manager.sid_from_eio_sid(eio_sid, "/")
-            for eio_sid in socketio.server.eio.sockets.copy()}
-
-
-def close_idle_connections(now):
-    """Close connections that never joined a room, or sat in one doing nothing
-    for IDLE_SECONDS. Closing the engine.io connection frees its gunicorn
-    thread, even when the client ignores socket.io disconnects."""
-    connections = open_connections()
-    with state_lock:
-        idle = {sid for sid in PLAYER_ROOMS if now - LAST_ACTIVE.get(sid, now) > IDLE_SECONDS}
-        in_room = set(PLAYER_ROOMS) - idle
-    for gone in set(ROOMLESS_SINCE) - set(connections):
-        del ROOMLESS_SINCE[gone]
-    to_close = []
-    for eio_sid, sid in connections.items():
-        if sid in in_room:
-            ROOMLESS_SINCE.pop(eio_sid, None)
-        elif sid in idle or now - ROOMLESS_SINCE.setdefault(eio_sid, now) > ROOMLESS_SECONDS:
-            to_close.append(eio_sid)
-    for eio_sid in to_close:
-        ROOMLESS_SINCE.pop(eio_sid, None)
-        socketio.server.eio.disconnect(eio_sid)
+def next_deadline():
+    """When the clock has something to do: the earliest countdown end or race
+    time limit, None without either. Hold state_lock."""
+    deadlines = [state["starts_at"] if state["status"] == "countdown"
+                 else state["started_at"] + RACE_SECONDS
+                 for state in ROOM_LIST.values() if state["status"] in ("countdown", "playing")]
+    return min(deadlines, default=None)
 
 
 def tick():
-    """Run countdowns, time limits and cleanup. The room clock calls this."""
-    global next_cleanup
+    """Send the text of countdowns that are over, end races past the time limit."""
     now = time.monotonic()
     outbox = []
     with state_lock:
@@ -420,19 +397,23 @@ def tick():
             elif state["status"] == "playing" and now >= state["started_at"] + RACE_SECONDS:
                 finish_race(room, outbox)
     send(outbox)
-    if now >= next_cleanup:
-        next_cleanup = now + CLEANUP_SECONDS
-        close_idle_connections(now)
 
 
 def room_clock():
-    """One thread for every room's timers, instead of a thread per race."""
+    """One thread for every room's timers. It sleeps until the next deadline,
+    or until a new countdown wakes it."""
     while True:
-        socketio.sleep(CLOCK_SECONDS)
         try:
+            with state_lock:
+                deadline = next_deadline()
+            clock_wakeup.wait(None if deadline is None else max(0, deadline - time.monotonic()))
+            # cleared before tick() reads the rooms, so a countdown started meanwhile
+            # is either in this tick or wakes the next wait
+            clock_wakeup.clear()
             tick()
         except Exception:
             log.exception("room clock")
+            socketio.sleep(1)
 
 
 def ensure_clock():
@@ -443,12 +424,7 @@ def ensure_clock():
             try:
                 clock_thread = socketio.start_background_task(room_clock)
             except RuntimeError:
-                log.exception("can't start the room clock, trying again with the next connection")
-
-
-def mark_active(user_id, now):
-    """Remember a player's last event. Hold state_lock."""
-    LAST_ACTIVE[user_id] = now
+                log.exception("can't start the room clock, trying again with the next start")
 
 
 @app.get("/healthz")
@@ -459,16 +435,10 @@ def healthz():
 
 # Handlers take *_ so extra arguments from a client don't raise TypeError.
 
-@socketio.on("connect")
-def handle_connect(auth=None, *_):
-    ensure_clock()
-
-
 @socketio.on("disconnect")
 def handle_disconnect(reason=None, *_):
     outbox = []
     with state_lock:
-        LAST_ACTIVE.pop(request.sid, None)
         remove_player(request.sid, outbox)
     send(outbox)
     for limiter in (PROGRESS_LIMIT, FINISH_LIMIT, ACTION_LIMIT):
@@ -485,6 +455,9 @@ def handle_join(data=None, *_):
     if not ROOM_ID_PATTERN.fullmatch(room):
         return {"ok": False, "error": "invalid room id"}
     username = clean_username(data.get("username"))
+    player_id = data.get("player_id")
+    if not isinstance(player_id, str) or not PLAYER_ID_PATTERN.fullmatch(player_id):
+        player_id = None
     # only used when this join creates the room
     language = data.get("language")
     if not isinstance(language, str) or language not in TEXTS:
@@ -494,17 +467,23 @@ def handle_join(data=None, *_):
     outbox = []
     with state_lock:
         remove_player(user_id, outbox)
+        if player_id and room in ROOM_LIST:
+            # this tab reconnected, its old connection would keep the name
+            # until the ping timeout
+            for old in [sid for sid, player in ROOM_LIST[room]["players"].items()
+                        if player["player_id"] == player_id]:
+                remove_player(old, outbox)
         if room not in ROOM_LIST:
             ROOM_LIST[room] = new_room(language)
         players = ROOM_LIST[room]["players"]
-        players[user_id] = {"progress": 0, "too_fast": False,
+        players[user_id] = {"progress": 0, "player_id": player_id,
                             "username": unique_username(username, players)}
         PLAYER_ROOMS[user_id] = room
-        mark_active(user_id, time.monotonic())
         bump(room)
         queue(outbox, room, "room_update", room_state(room))
     send(outbox)
-    return {"ok": True}
+    # the room code as the server spells it, clients compare messages with it
+    return {"ok": True, "room": room}
 
 
 @socketio.on("leave")
@@ -526,7 +505,6 @@ def handle_set_language(data=None, *_):
         room = PLAYER_ROOMS.get(request.sid)
         if room is None:
             return {"ok": False, "error": "not in a room"}
-        mark_active(request.sid, time.monotonic())
         if ROOM_LIST[room]["status"] in ("countdown", "playing"):
             return {"ok": False, "error": "game already running"}
         ROOM_LIST[room]["language"] = language
@@ -544,19 +522,18 @@ def handle_game_start(data=None, *_):
         room = PLAYER_ROOMS.get(request.sid)
         if room is None:
             return {"ok": False, "error": "not in a room"}
-        now = time.monotonic()
-        mark_active(request.sid, now)
         if ROOM_LIST[room]["status"] in ("countdown", "playing"):
             return {"ok": False, "error": "game already running"}
         # the room clock sends the text when the countdown is over
         ROOM_LIST[room].update(status="countdown",
-                               **race_fields(starts_at=now + COUNTDOWN_SECONDS))
+                               **race_fields(starts_at=time.monotonic() + COUNTDOWN_SECONDS))
         for player in ROOM_LIST[room]["players"].values():
-            player.update(progress=0, too_fast=False)
+            player["progress"] = 0
         bump(room)
         queue(outbox, room, "room_update", room_state(room))
     send(outbox)
     ensure_clock()
+    clock_wakeup.set()
     return {"ok": True}
 
 
@@ -581,25 +558,15 @@ def handle_progress(data=None, *_):
         if room is None:
             return
         state = ROOM_LIST[room]
-        now = time.monotonic()
-        mark_active(user_id, now)
         # players who joined mid-race never got the text, they watch
         if state["status"] != "playing" or user_id not in state["racers"]:
             return
-        typed = progress / 100 * len(state["text"])
-        possible = HEAD_START_CHARS + (now - state["started_at"]) * MAX_CHARS_PER_SECOND
-        if MAX_CHARS_PER_SECOND and typed > possible:
-            # faster than any person: out of this race
-            state["players"][user_id]["too_fast"] = True
-            state["racers"].discard(user_id)
-            bump(room)
-            if not state["racers"]:
-                finish_race(room, outbox)
-            queue(outbox, room, "room_update", room_state(room))
-        elif progress >= 100:
+        if progress >= 100:
             finish_race(room, outbox, winner_id=user_id)
         else:
             state["players"][user_id]["progress"] = progress
+            # its own version, so an older room update can't overwrite it
+            bump(room)
             queue(outbox, room, "progress_percentage", {
                 "room": room, "user_id": user_id, "progress": progress,
                 "version": state["version"]})

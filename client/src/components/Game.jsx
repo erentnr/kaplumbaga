@@ -4,7 +4,7 @@ import { Link, useParams } from "react-router";
 import '../Game.css';
 
 import TurtleSvg from '../assets/turtle.svg';
-import { getUsername } from '../username';
+import { getPlayerId, getUsername } from '../username';
 import { LANGUAGES, getPreferredLanguage, savePreferredLanguage } from '../languages';
 
 // One race room. Mounted again after every reconnection, so a new socket
@@ -30,10 +30,14 @@ const Race = ({socket, roomID, onFatalError}) => {
   useEffect(() => {
     // The server sends messages after releasing its lock, so they can arrive
     // out of order. Each carries its room and the room version it was made
-    // from, drop anything older than what was already seen.
+    // from, drop anything older than what was already seen. Messages without
+    // them come from an older server (a rolled back deploy) and are kept.
+    let joinedRoom = roomID
     let latestVersion = 0
     const isStale = (room, version) => {
-      if (room !== roomID || version < latestVersion) return true
+      if (room !== undefined && room !== joinedRoom) return true
+      if (version === undefined) return false
+      if (version < latestVersion) return true
       latestVersion = version
       return false
     }
@@ -96,8 +100,19 @@ const Race = ({socket, roomID, onFatalError}) => {
     let retryTimer
     const join = () => {
       // language is only used if this join creates the room
-      socket.emit('join', {room_id: roomID, username: username, language: getPreferredLanguage()}, (response) => {
-        if (!active || response?.ok) return
+      socket.emit('join', {
+        room_id: roomID,
+        username: username,
+        language: getPreferredLanguage(),
+        // a reconnecting tab replaces its old connection, and keeps its name
+        player_id: getPlayerId(),
+      }, (response) => {
+        if (!active) return
+        if (response?.ok) {
+          // the room code as the server spells it
+          if (response.room) joinedRoom = response.room
+          return
+        }
         if (response?.error === 'too many requests') {
           // rate limited, try again in a moment instead of giving up
           retryTimer = setTimeout(join, 2000)
@@ -180,16 +195,12 @@ const Race = ({socket, roomID, onFatalError}) => {
   }
 
   const isRacing = status === 'countdown' || status === 'playing'
-  // the server takes out a player who types faster than any person, until the next race
-  const tooFast = competitors[socket.id]?.too_fast
   const secondsLeft = countdownEnd === null ? 0 : Math.max(0, Math.ceil((countdownEnd - now) / 1000))
 
   let message
   if (status === 'finished' && winner) {
     // the id tells apart players with the same name
     message = winnerID === socket.id ? 'You won!' : `${winner} won!`
-  } else if (tooFast && (status === 'playing' || status === 'finished')) {
-    message = "Too fast to be human, you're out of this race."
   } else if (status === 'finished') {
     message = 'Race over, nobody finished.'
   } else if (status === 'countdown') {
@@ -247,7 +258,7 @@ const Race = ({socket, roomID, onFatalError}) => {
             ref={inputRef}
             value={userInput}
             onChange={handleChange}
-            disabled={status !== 'playing' || !randomText || tooFast}
+            disabled={status !== 'playing' || !randomText}
             autoCapitalize="off"
             autoComplete="off"
             autoCorrect="off"
@@ -288,8 +299,9 @@ const Game = ({socket}) => {
   const [fatalError, setFatalError] = useState('');
 
   const params = useParams();
-  // room codes are lowercase, phone keyboards like to capitalize them
-  const roomID = params.room_id.toLowerCase();
+  // codes are lowercase, phone keyboards like to capitalize them; the server
+  // also trims spaces and line breaks, like in /play/abc%0A
+  const roomID = params.room_id.trim().toLowerCase();
 
   useEffect(() => {
     const onConnect = () => {
