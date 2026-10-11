@@ -25,11 +25,17 @@ const Modal = ({showModal, onSave, onClose}) => {
     if (event.target === dialogRef.current) onClose()
   }
 
+  // Escape closes the dialog on its own. Its close event comes a moment
+  // after any close, when the dialog may be open again.
+  const handleClose = () => {
+    if (!dialogRef.current.open) onClose()
+  }
+
   return (
     <dialog
       ref={dialogRef}
       className="modal-main"
-      onClose={onClose}
+      onClose={handleClose}
       onClick={handleClick}
     >
       <form className="modal-content" onSubmit={handleSubmit}>

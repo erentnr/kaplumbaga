@@ -83,4 +83,8 @@
   color: #5C6346;
   cursor: pointer;
   margin-left: 5px;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
 }

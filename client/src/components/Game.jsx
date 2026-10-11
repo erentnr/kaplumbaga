@@ -7,16 +7,15 @@ import TurtleSvg from '../assets/turtle.svg';
 import { getPlayerId, getUsername } from '../username';
 import { LANGUAGES, getPreferredLanguage, savePreferredLanguage } from '../languages';
 
-// the word to type next at `progress` percent of the text, counted like
-// sendProgress counts it
-const wordAt = (text, progress) => {
-  const words = text.split(" ")
-  let typed = 0
+// percent of the text typed once the words before `index` are done, each
+// with its space. wordAt turns it back into a word with the same numbers.
+const progressAt = (words, text, index) =>
+  Math.min(100, (words.slice(0, index).reduce((total, word) => total + word.length + 1, 0) / text.length) * 100)
+
+// the word to type next at `progress` percent
+const wordAt = (words, text, progress) => {
   let index = 0
-  while (index < words.length - 1 && ((typed + words[index].length + 1) / text.length) * 100 <= progress) {
-    typed += words[index].length + 1
-    index++
-  }
+  while (index < words.length - 1 && progressAt(words, text, index + 1) <= progress) index++
   return index
 }
 
@@ -33,6 +32,8 @@ const Race = ({socket, roomID, onFatalError}) => {
   const [language, setLanguage] = useState(getPreferredLanguage);
   const [countdownEnd, setCountdownEnd] = useState(null);
   const [now, setNow] = useState(() => Date.now());
+  // why the server turned down Start or a language change
+  const [notice, setNotice] = useState('');
 
   const inputRef = useRef(null);
 
@@ -41,41 +42,22 @@ const Race = ({socket, roomID, onFatalError}) => {
   const words = randomText ? randomText.split(" ") : [];
 
   useEffect(() => {
-    // The server sends messages after releasing its lock, so they can arrive
-    // out of order. Each carries its room and the room version it was made
-    // from, drop anything older than what was already seen. Messages without
-    // them come from an older server (a rolled back deploy) and are kept.
-    let latestVersion = 0
-    // version of the last countdown, a text older than it is from an earlier race
-    let countdownVersion = 0
+    // The server sends the messages in the order the changes happened. Drop
+    // those of a room this tab has left, messages without a room come from
+    // an older server (a rolled back deploy).
     const isOtherRoom = (room) => room !== undefined && room !== roomID
-    const isStale = (room, version) => {
-      if (isOtherRoom(room)) return true
-      if (version === undefined) return false
-      if (version < latestVersion) return true
-      latestVersion = version
-      return false
-    }
 
     // players, game status, winner and text language of the room
     const onRoomUpdate = (state) => {
-      if (isStale(state.room, state.version)) return
-      // Progress messages carry the room's version and are always made after
-      // the room update of that version, but can arrive before it. Keep the
-      // progress they brought.
-      setCompetitors(prev => Object.fromEntries(Object.entries(state.players).map(([id, player]) => [
-        id,
-        state.version !== undefined && prev[id]?.version === state.version
-          ? {...player, progress: prev[id].progress, version: state.version}
-          : player,
-      ])))
+      if (isOtherRoom(state.room)) return
+      setNotice('')
+      setCompetitors(state.players)
       setStatus(state.status)
       setWinner(state.winner)
       setWinnerID(state.winner_id)
       setLanguage(state.language)
       if (state.status === 'countdown') {
         // a new race is about to start, clear the previous one
-        countdownVersion = state.version ?? 0
         setCountdownEnd(Date.now() + state.starts_in * 1000)
         setNow(Date.now())
         setRandomText('')
@@ -85,32 +67,29 @@ const Race = ({socket, roomID, onFatalError}) => {
         setCountdownEnd(null)
       }
     }
-    // The race text, sent once to every racer. Kept even when newer messages
-    // came first, like the update of a player joining as the race started,
-    // unless it's from an earlier race. The room updates set the status.
-    const onLoadText = (text, version, room, progress = 0) => {
-      if (isOtherRoom(room) || (version !== undefined && version < countdownVersion)) return
+    // the race text, a room update with the status comes right after it
+    const onLoadText = (text, room, progress = 0) => {
+      if (isOtherRoom(room)) return
       setRandomText(text)
       // a racer who reconnected types on from where they were
-      setCurrent(wordAt(text, progress))
+      setCurrent(wordAt(text.split(" "), text, progress))
       setUserInput('')
     }
     // get current progress of a competitor
     const onProgress = (data) => {
-      if (isStale(data.room, data.version)) return
+      if (isOtherRoom(data.room)) return
       setCompetitors(
         prev => ({
           ...prev,
           [data.user_id]: {
             ...prev[data.user_id],
             progress: data.progress,
-            version: data.version,
           }
         })
       )
     }
     const onFinish = (data) => {
-      if (isStale(data.room, data.version)) return
+      if (isOtherRoom(data.room)) return
       setStatus('finished')
       setWinner(data.winner)
       setWinnerID(data.winner_id)
@@ -167,28 +146,35 @@ const Race = ({socket, roomID, onFatalError}) => {
     if (status === 'playing' && randomText) inputRef.current?.focus()
   }, [status, randomText]);
 
+  const showRefusal = (response) => {
+    // "game already running": someone else pressed Start first, the countdown says it all
+    if (response?.ok === false && response.error !== 'game already running') setNotice(response.error)
+  }
+
   const handleStart = () => {
     // send game_start message to server, it starts a countdown for everyone
-    socket.emit('game_start')
+    socket.emit('game_start', showRefusal)
   }
 
   const handleLanguage = (event) => {
+    const code = event.target.value
     // the server sends the new language to everyone in the room
-    savePreferredLanguage(event.target.value)
-    socket.emit('set_language', {language: event.target.value})
+    socket.emit('set_language', {language: code}, (response) => {
+      // remembered for the rooms this player creates, once this room took it
+      if (response?.ok) savePreferredLanguage(code)
+      showRefusal(response)
+    })
   }
 
-  const sendProgress = (wordIndex, input) => {
-    // length of the completed words including their trailing whitespace
-    const completed = words.slice(0, wordIndex).reduce((total, word) => total + word.length + 1, 0)
-    const progress = Math.min(100, ((completed + input.length) / randomText.length) * 100)
+  const sendProgress = (wordsDone) => {
     // server ends the game when someone reaches 100
-    socket.emit('progress', {progress: progress})
+    socket.emit('progress', {progress: progressAt(words, randomText, wordsDone)})
   }
 
   const handleChange = (event) => {
-    // some keyboards send accented letters as letter + combining mark
-    const value = event.target.value.normalize('NFC')
+    // some keyboards send accented letters as letter + combining mark, and
+    // curly apostrophes where the text has straight ones
+    const value = event.target.value.normalize('NFC').replace(/[\u2018\u2019]/g, "'")
     const currentWord = words[current]
     const isLastWord = current === words.length - 1
     // the word is done when it is typed correctly and followed by a space.
@@ -197,14 +183,12 @@ const Race = ({socket, roomID, onFatalError}) => {
     if (!isLastWord && value === currentWord + ' ') {
       setCurrent(current + 1)
       setUserInput('')
-      sendProgress(current + 1, '')
+      // once a word, not every key: every player of the room gets each one
+      sendProgress(current + 1)
       return
     }
     setUserInput(value)
-    // only move the kaplumbaga while user keeps writing correctly
-    if (currentWord.startsWith(value)) {
-      sendProgress(current, value)
-    }
+    if (isLastWord && value === currentWord) sendProgress(words.length)
   }
 
   const wordStatus = (index) => {
@@ -218,7 +202,9 @@ const Race = ({socket, roomID, onFatalError}) => {
   const secondsLeft = countdownEnd === null ? 0 : Math.max(0, Math.ceil((countdownEnd - now) / 1000))
 
   let message
-  if (status === 'finished' && winner) {
+  if (notice) {
+    message = notice
+  } else if (status === 'finished' && winner) {
     // the id tells apart players with the same name
     message = winnerID === socket.id ? 'You won!' : `${winner} won!`
   } else if (status === 'finished') {

@@ -81,12 +81,13 @@ const Home = () => {
         />
         <div className="username-wrapper">
          <p>Joining as {username}. 
-          <span
+          <button
+            type="button"
             className="change-username"
             onClick={handleNewUsername}
           >
             Change
-          </span>
+          </button>
         </p>
         </div>
         <h2>or</h2>

@@ -240,6 +240,15 @@ def test_names_that_look_the_same_get_a_number():
     assert names() == sorted(["alice", "ali" + ZWJ + "ce 2", "alice" + EMOJI_STYLE + " 3"])
 
 
+def test_numbered_names_are_cleaned_after_shortening():
+    # cut to make room for " 2", a name could end in a space or a joiner
+    spaced = "x" * 21 + " yz"
+    family = "x" * 20 + MAN + ZWJ + WOMAN + "y"
+    for name in (spaced, spaced, family, family):
+        connect(name)
+    assert sorted(names()) == sorted([spaced, "x" * 21 + " 2", family, "x" * 20 + MAN + " 2"])
+
+
 def test_username_control_and_direction_characters_are_removed():
     # a line break could fake a log line, U+202E reverses the text others see
     connect("ali" + NEWLINE + "ce" + RIGHT_TO_LEFT_OVERRIDE + ZERO_WIDTH_SPACE + BELL + "  ")
@@ -300,9 +309,7 @@ def test_a_reconnecting_racer_stays_in_the_race():
     received = new.get_received()
     # the text again, with the progress to type on from
     assert [msg["name"] for msg in received] == ["load_text", "room_update"]
-    text, version, room, progress = received[0]["args"]
-    assert (text, room, progress) == (game.TEXTS["en"], "abc12", 40)
-    assert version == received[1]["args"][0]["version"]
+    assert received[0]["args"] == [game.TEXTS["en"], "abc12", 40]
     new.emit("progress", {"progress": 100})
     assert game.ROOM_LIST["abc12"]["winner_id"] == sid(new)
 
@@ -422,15 +429,12 @@ def test_full_game_flow():
 
 def test_race_text_is_the_first_argument():
     # browser tabs still running the previous client read the text from the
-    # first argument, the version and room come after it
+    # first argument, the room comes after it
     alice = connect("alice")
     alice.get_received()
     start(alice)
     (message,) = [msg for msg in alice.get_received() if msg["name"] == "load_text"]
-    text, version, room = message["args"]
-    assert text == game.TEXTS["en"]
-    assert version == game.ROOM_LIST["abc12"]["version"]
-    assert room == "abc12"
+    assert message["args"] == [game.TEXTS["en"], "abc12"]
 
 
 def test_progress_is_validated():
@@ -492,15 +496,12 @@ def test_players_who_joined_mid_race_cannot_finish():
 def test_a_player_joining_as_the_race_starts_does_not_get_its_text(monkeypatch):
     # The text is queued under the lock and sent after it. A player who joins
     # in between is in the room by then, but isn't racing.
-    queued = []
-    send = game.send
-    monkeypatch.setattr(game, "send", queued.append)
     alice = connect("alice")
     alice.emit("game_start")
-    game.tick()  # text queued, not sent yet
-    carol = connect("carol")
-    for outbox in queued:
-        send(outbox)
+    with monkeypatch.context() as patch:
+        patch.setattr(game, "flush", lambda: None)
+        game.tick()  # text queued, not sent yet
+    carol = connect("carol")  # her join sends everything queued
     assert texts(alice) == [game.TEXTS["en"]]
     received = carol.get_received()
     assert [msg for msg in received if msg["name"] == "load_text"] == []
@@ -613,34 +614,6 @@ def test_finish_floods_never_take_the_lock(monkeypatch):
     assert counting.entered <= game.FINISH_LIMIT.burst
 
 
-def test_progress_keeps_the_room_version():
-    # With a new version per progress message, one arriving first made
-    # clients drop an older room update: a player joining mid-race lost the
-    # players and status, a player who left stayed on the track.
-    alice = connect("alice")
-    start(alice)
-    carol = connect("carol")
-    joined = events(carol, "room_update")[-1]["version"]
-    for progress in (10, 20, 30):
-        alice.emit("progress", {"progress": progress})
-    versions = [data["version"] for data in events(carol, "progress_percentage")]
-    assert versions == [joined] * 3 and game.ROOM_LIST["abc12"]["version"] == joined
-
-
-def test_winner_progress_carries_the_finish_version():
-    # with the version from before the finish, an earlier 99% message
-    # arriving late was accepted and pulled the turtle back
-    alice = connect("alice")
-    bob = connect("bob")
-    start(alice)
-    alice.emit("progress", {"progress": 99})
-    earlier = events(bob, "progress_percentage")[-1]["version"]
-    alice.emit("progress", {"progress": 100})
-    received = {msg["name"]: msg["args"][0] for msg in bob.get_received()}
-    assert received["progress_percentage"]["progress"] == 100
-    assert received["progress_percentage"]["version"] == received["finish_game"]["version"] > earlier
-
-
 def test_messages_are_never_sent_while_holding_the_state_lock(monkeypatch):
     # a send can close a socket that stopped answering pings, and engineio
     # then runs handle_disconnect in the same thread, which needs the lock
@@ -687,22 +660,47 @@ def test_a_socket_closing_while_messages_are_sent_does_not_deadlock(monkeypatch)
     assert names() == ["alice"]
 
 
-def test_messages_carry_increasing_room_versions():
-    # sent outside the lock, messages can arrive out of order: clients drop
-    # anything older than the newest version they have seen
+def test_messages_go_out_in_the_order_of_the_changes(monkeypatch):
+    # Each thread used to send its own messages after the lock: a join's
+    # update could overtake the race text queued just before it, and the
+    # client needed version numbers to sort them out.
     alice = connect("alice")
-    connect("bob")
-    start(alice)
-    alice.emit("progress", {"progress": 100})
-    versions = []
-    for msg in alice.get_received():
-        if msg["name"] == "load_text":
-            versions.append(msg["args"][1])
-        elif msg["name"] in ("room_update", "finish_game"):
-            versions.append(msg["args"][0]["version"])
-    assert len(versions) >= 5
-    assert versions == sorted(versions)
-    assert len(set(versions)) >= 4
+    alice.get_received()
+    with monkeypatch.context() as patch:
+        patch.setattr(game, "flush", lambda: None)
+        alice.emit("game_start")
+        game.tick()  # countdown, text and race start queued, none sent
+    connect("bob")  # his join sends everything queued before it, then its own
+    received = [(msg["name"], msg["args"][0]["status"] if msg["name"] == "room_update" else None)
+                for msg in alice.get_received()]
+    assert received == [("room_update", "countdown"), ("load_text", None),
+                        ("room_update", "playing"), ("room_update", "playing")]
+
+
+def test_one_thread_sends_at_a_time(monkeypatch):
+    # a thread that finds another one sending leaves its messages to it,
+    # instead of waiting or sending them first
+    alice = connect("alice")
+    bob = connect("bob")
+    alice.get_received()
+    real_emit = game.socketio.emit
+    sending, go_on = threading.Event(), threading.Event()
+
+    def emit(event, *args, **kwargs):
+        if not sending.is_set():
+            sending.set()
+            go_on.wait(3)
+        return real_emit(event, *args, **kwargs)
+
+    monkeypatch.setattr(game.socketio, "emit", emit)
+    first = threading.Thread(target=lambda: alice.emit("set_language", {"language": "de"}))
+    first.start()
+    assert sending.wait(3)
+    bob.emit("set_language", {"language": "fr"})  # returns while the first send hangs
+    assert events(alice, "room_update") == []
+    go_on.set()
+    first.join(3)
+    assert [state["language"] for state in events(alice, "room_update")] == ["de", "fr"]
 
 
 def test_room_update_copies_the_players():
@@ -787,10 +785,10 @@ def test_an_error_in_one_room_does_not_hold_back_the_others(monkeypatch):
     alice.emit("game_start")
     real_start_race = game.start_race
 
-    def start_race(room, now, outbox):
+    def start_race(room, now):
         if room == "room2":
             raise ValueError("broken room")
-        real_start_race(room, now, outbox)
+        real_start_race(room, now)
 
     monkeypatch.setattr(game, "start_race", start_race)
     game.tick()
@@ -928,6 +926,8 @@ def test_every_language_has_a_typable_text():
         assert text == text.strip() and "  " not in text and NEWLINE not in text
         # the client compares NFC normalized input
         assert unicodedata.is_normalized("NFC", text)
+        # and turns curly apostrophes, typed by some phone keyboards, into straight ones
+        assert chr(0x2018) not in text and chr(0x2019) not in text
 
 
 def test_source_has_no_invisible_characters():
@@ -1045,13 +1045,17 @@ class HeldSockets:
             self.released.wait(5)
         return [b"ok"]
 
-    def request(self, ip, path="/socket.io/?EIO=4&transport=websocket", header_ip=None, origin=None):
+    def request(self, ip, path="/socket.io/?EIO=4&transport=websocket", header_ip=None, origin=None,
+                sock=None):
         """Returns the HTTP status of a request that isn't held."""
         headers = {"CF-Connecting-IP": header_ip} if header_ip else {}
         if origin:
             headers["Origin"] = origin
+        environ_base = {"REMOTE_ADDR": ip}
+        if sock:
+            environ_base["gunicorn.socket"] = sock
         environ = EnvironBuilder(path=path, headers=headers,
-                                 environ_base={"REMOTE_ADDR": ip}).get_environ()
+                                 environ_base=environ_base).get_environ()
         statuses = []
         b"".join(self.limits(environ, lambda status, headers: statuses.append(status)))
         return int(statuses[0].split()[0])
@@ -1122,6 +1126,31 @@ def test_pages_on_other_sites_are_refused_before_they_count(monkeypatch, clock, 
         assert sockets.request("203.0.113.1", origin="https://elsewhere.example") == 403
     assert sockets.request("203.0.113.1", origin=game.CORS_ORIGINS[0]) == 200
     assert sockets.request("203.0.113.1") == 200
+
+
+def test_a_silent_connection_times_out(sockets):
+    # engine.io looks for simple-websocket's socket under another name and
+    # never set a timeout: a client gone without closing, like a phone that
+    # lost Wi-Fi behind the tunnel, kept its thread and slot for good
+    class Socket:
+        timeout = None
+
+        def settimeout(self, seconds):
+            self.timeout = seconds
+
+    sock = Socket()
+    assert sockets.request("203.0.113.1", sock=sock) == 200
+    assert sock.timeout == game.PING_INTERVAL + game.PING_TIMEOUT
+    # a live client answers engine.io's pings well within it
+    eio = game.socketio.server.eio
+    assert (eio.ping_interval, eio.ping_timeout) == (game.PING_INTERVAL, game.PING_TIMEOUT)
+
+
+def test_a_full_room_fits_behind_one_address():
+    # a class and its teacher on one network, with slots left to reconnect
+    # while the old connections time out
+    assert game.MAX_SOCKETS_PER_CLIENT > game.MAX_PLAYERS_PER_ROOM
+    assert game.CONNECT_LIMIT.burst > game.MAX_PLAYERS_PER_ROOM
 
 
 def test_ipv6_clients_count_per_64(monkeypatch, sockets):

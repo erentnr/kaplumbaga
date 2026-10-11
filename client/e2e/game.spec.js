@@ -71,32 +71,11 @@ const turtleOffsets = (page, name) => page.locator('.kaplumbaga-wrapper', { hasT
   })
 const turtleLeft = async (page, name) => (await turtleOffsets(page, name)).fromStart
 
-async function typeWholeText(page, from = 0) {
+// types the words from `from` on, each as `typed` turns it into keys
+async function typeWholeText(page, { from = 0, typed = (word) => word } = {}) {
   const all = await words(page).allTextContents()
   for (let i = from; i < all.length; i++) {
-    await input(page).pressSequentially(i < all.length - 1 ? `${all[i]} ` : all[i])
-  }
-}
-
-// Routes a page's socket through the test: server messages for which
-// `isHeld` returns true wait until release(). Call before the page loads.
-async function holdServerMessages(page, isHeld) {
-  const held = []
-  let route
-  let holding = true
-  await page.routeWebSocket(/socket\.io/, (ws) => {
-    route = ws
-    ws.connectToServer().onMessage((message) => {
-      if (holding && isHeld(String(message))) held.push(message)
-      else ws.send(message)
-    })
-  })
-  return {
-    held,
-    release: () => {
-      holding = false
-      held.splice(0).forEach((message) => route.send(message))
-    },
+    await input(page).pressSequentially(i < all.length - 1 ? `${typed(all[i])} ` : typed(all[i]))
   }
 }
 
@@ -229,7 +208,8 @@ test('every language can be raced', async ({ joinAs }) => {
     await expect(alice.page.locator('.game-text')).toHaveAttribute('lang', language)
     await startButton(alice.page).click()
     await expect(input(alice.page)).toBeFocused()
-    await typeWholeText(alice.page)
+    // phone keyboards can type a curly apostrophe for the straight one in "l'heure"
+    await typeWholeText(alice.page, { typed: (word) => word.replaceAll("'", '\u2019') })
     await expect(message(alice.page)).toHaveText('You won!')
   }
   expect(alice.errors).toEqual([])
@@ -299,54 +279,6 @@ test('a room address with a trailing line break still works', async ({ joinAs })
   await expect(words(bob.page).first()).toBeVisible()
 })
 
-test('the race text still shows when a newer update came first', async ({ joinAs }) => {
-  // The text is sent once. When the update of a player joining just then
-  // arrived first, the client dropped the text as old and bob couldn't type.
-  const room = newRoom()
-  const alice = await joinAs('alice', room)
-  let messages
-  const bob = await joinAs('bob', room, {
-    beforeGoto: async (page) => {
-      messages = await holdServerMessages(page, (message) => message.startsWith('42["load_text"'))
-    },
-  })
-  await expect(turtles(alice.page)).toHaveText(['alice', 'bob'])
-  await startButton(alice.page).click()
-  await expect.poll(() => messages.held.length).toBe(1)
-  await joinAs('carol', room)
-  await expect(turtles(bob.page)).toHaveText(['alice', 'bob', 'carol'])
-  messages.release()
-  await expect(input(bob.page)).toBeEnabled()
-  await typeWholeText(bob.page)
-  await expect(message(alice.page)).toHaveText('bob won!')
-})
-
-test('an update that arrives late never moves a turtle back', async ({ joinAs }) => {
-  // progress carries the room's version, an older update of the same
-  // version was taken as newer and put alice's turtle back at the start
-  const room = newRoom()
-  const alice = await joinAs('alice', room)
-  let messages
-  const bob = await joinAs('bob', room, {
-    beforeGoto: async (page) => {
-      messages = await holdServerMessages(page, (message) => message.includes('"carol"'))
-    },
-  })
-  await startButton(alice.page).click()
-  await expect(input(alice.page)).toBeEnabled()
-  await joinAs('carol', room)
-  await expect.poll(() => messages.held.length).toBe(1)
-  const firstWord = await words(alice.page).first().textContent()
-  await input(alice.page).pressSequentially(`${firstWord} `)
-  const aliceLeft = () => bob.page.locator('.kaplumbaga-wrapper', { hasText: 'alice' })
-    .locator('.kaplumbaga').evaluate((turtle) => turtle.style.left)
-  await expect.poll(aliceLeft).not.toBe('0%')
-  const moved = await aliceLeft()
-  messages.release()
-  await expect(turtles(bob.page)).toHaveText(['alice', 'bob', 'carol'])
-  expect(await aliceLeft()).toBe(moved)
-})
-
 test('a racer who reconnects types on from where they were', async ({ joinAs }) => {
   const room = newRoom()
   const alice = await joinAs('alice', room)
@@ -369,9 +301,25 @@ test('a racer who reconnects types on from where they were', async ({ joinAs }) 
   await expect(input(bob.page)).toBeEnabled()
   await expect(words(bob.page).nth(1)).toHaveClass('correct')
   await expect(words(bob.page).nth(2)).toHaveClass('current')
-  await typeWholeText(bob.page, 2)
+  await typeWholeText(bob.page, { from: 2 })
   await expect(message(bob.page)).toHaveText('You won!')
   await expect(message(alice.page)).toHaveText('bob won!')
+})
+
+test('the player is told when the server turns down a change', async ({ joinAs }) => {
+  // the replies were thrown away, the picker or Start just did nothing
+  const alice = await joinAs('alice', newRoom())
+  await expect(turtles(alice.page)).toHaveText(['alice'])
+  // more changes than the server takes at once
+  for (let i = 0; i < 20; i++) {
+    await languageSelect(alice.page).selectOption(i % 2 ? 'de' : 'fr')
+  }
+  await expect(message(alice.page)).toHaveText('too many requests')
+  // the next change that goes through clears it
+  await expect(async () => {
+    await startButton(alice.page).click()
+    await expect(message(alice.page)).toHaveText('Get ready!', { timeout: 500 })
+  }).toPass()
 })
 
 test('works when the browser blocks site data', async ({ browser }) => {
@@ -400,6 +348,7 @@ test('works when the browser blocks site data', async ({ browser }) => {
 test('the username dialog can be closed without saving', async ({ page }) => {
   await page.goto('/')
   const dialog = page.locator('.modal-main')
+  const change = page.getByRole('button', { name: 'Change' })
   const joiningAs = page.getByText(/^Joining as /)
   const before = await joiningAs.textContent()
   for (const close of [
@@ -407,14 +356,16 @@ test('the username dialog can be closed without saving', async ({ page }) => {
     () => page.keyboard.press('Escape'),
     () => page.mouse.click(5, 5),  // outside the dialog
   ]) {
-    await page.click('.change-username')
+    await change.click()
     await expect(page.locator('.username-input')).toBeFocused()
     await close()
     await expect(dialog).toBeHidden()
   }
   await expect(joiningAs).toHaveText(before)
-  // Enter saves
-  await page.click('.change-username')
+  // opened from the keyboard too, Enter saves
+  await change.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.locator('.username-input')).toBeFocused()
   await page.keyboard.type('erin')
   await page.keyboard.press('Enter')
   await expect(dialog).toBeHidden()
