@@ -273,6 +273,18 @@ test('a tab that reconnects keeps its name', async ({ joinAs }) => {
   await expect(turtles(alice.page)).toHaveText(['alice', 'bob'])
 })
 
+test('a copy of a tab is another player', async ({ joinAs }) => {
+  const room = newRoom()
+  const alice = await joinAs('alice', room)
+  // window.open copies sessionStorage, like duplicating a tab
+  const [copy] = await Promise.all([
+    alice.page.waitForEvent('popup'),
+    alice.page.evaluate(() => window.open(location.href)),
+  ])
+  await expect(turtles(copy)).toHaveText(['alice', 'alice 2'])
+  await expect(turtles(alice.page)).toHaveText(['alice', 'alice 2'])
+})
+
 test('unknown addresses go to the home page', async ({ page }) => {
   for (const path of ['/foo', '/play/', '/play']) {
     await page.goto(path)

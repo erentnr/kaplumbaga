@@ -17,6 +17,8 @@ RIGHT_TO_LEFT_OVERRIDE = chr(0x202E)
 ZERO_WIDTH_SPACE = chr(0x200B)
 ZWNJ = chr(0x200C)
 ZWJ = chr(0x200D)
+UNIT_SEPARATOR = chr(0x1F)
+EMOJI_STYLE = chr(0xFE0F)
 MAN, WOMAN, GIRL = chr(0x1F468), chr(0x1F469), chr(0x1F467)
 
 
@@ -81,6 +83,11 @@ def names(room="abc12"):
     return sorted(p["username"] for p in game.ROOM_LIST[room]["players"].values())
 
 
+def sid(client):
+    """The socket.io sid, the key of PLAYER_ROOMS (eio_sid is engine.io's)."""
+    return game.socketio.server.manager.sid_from_eio_sid(client.eio_sid, "/")
+
+
 def sid_of(username, room="abc12"):
     return next(sid for sid, p in game.ROOM_LIST[room]["players"].items()
                 if p["username"] == username)
@@ -124,6 +131,14 @@ def test_room_id_with_a_newline_never_makes_a_separate_room():
     assert list(game.ROOM_LIST) == ["abc"]
     client = game.socketio.test_client(game.app)
     assert client.emit("join", {"room_id": "ab" + NEWLINE + "c", "username": "x"}, callback=True) == {
+        "ok": False, "error": "invalid room id"}
+
+
+def test_room_id_is_trimmed_like_the_client_trims_it():
+    # Python's strip() also drops U+001F, JavaScript's trim() doesn't: the
+    # client then waited for room "abc" + U+001F and dropped the first update
+    client = game.socketio.test_client(game.app)
+    assert client.emit("join", {"room_id": "abc" + UNIT_SEPARATOR, "username": "x"}, callback=True) == {
         "ok": False, "error": "invalid room id"}
 
 
@@ -213,7 +228,8 @@ def test_a_name_needs_a_visible_character():
 def test_names_that_look_the_same_get_a_number():
     connect("alice")
     connect("ali" + ZWJ + "ce")
-    assert names() == ["alice", "ali" + ZWJ + "ce 2"]
+    connect("alice" + EMOJI_STYLE)
+    assert names() == sorted(["alice", "ali" + ZWJ + "ce 2", "alice" + EMOJI_STYLE + " 3"])
 
 
 def test_username_control_and_direction_characters_are_removed():
@@ -242,7 +258,7 @@ def test_a_reconnecting_tab_keeps_its_name():
     new = game.socketio.test_client(game.app)
     new.emit("join", {"room_id": "abc12", "username": "alice", "player_id": "tab-12345678"})
     assert names() == ["alice", "bob"]
-    assert game.PLAYER_ROOMS.get(old.eio_sid) is None
+    assert sid(old) not in game.PLAYER_ROOMS and sid(new) in game.PLAYER_ROOMS
     # another tab of the same person is another player
     other = game.socketio.test_client(game.app)
     other.emit("join", {"room_id": "abc12", "username": "alice", "player_id": "tab-87654321"})
@@ -252,10 +268,13 @@ def test_a_reconnecting_tab_keeps_its_name():
 def test_a_reconnecting_tab_that_was_alone_keeps_the_room():
     old = game.socketio.test_client(game.app)
     old.emit("join", {"room_id": "abc12", "username": "alice", "player_id": "tab-12345678"})
+    old.emit("set_language", {"language": "de"})
     new = game.socketio.test_client(game.app)
-    reply = new.emit("join", {"room_id": "abc12", "username": "alice", "player_id": "tab-12345678"},
-                     callback=True)
+    reply = new.emit("join", {"room_id": "abc12", "username": "alice", "player_id": "tab-12345678",
+                              "language": "en"}, callback=True)
     assert reply == {"ok": True, "room": "abc12"} and names() == ["alice"]
+    # removing the old connection emptied the room, it came back in English
+    assert game.ROOM_LIST["abc12"]["language"] == "de"
 
 
 @pytest.mark.parametrize("player_id", ["short", "x" * 65, "has spaces in it", ["tab-12345678"], 12345678])
@@ -476,14 +495,13 @@ def test_room_clock_starts_again_after_it_failed_or_stopped(monkeypatch):
 
     monkeypatch.setattr(game.socketio, "start_background_task", failing_start)
     alice = connect("alice")
-    alice.emit("game_start")
-    assert game.clock_thread is None
+    # a countdown without the clock would never end, and Start stays disabled during it
+    assert alice.emit("game_start", callback=True) == {"ok": False, "error": "server busy, try again"}
+    assert game.clock_thread is None and status() == "waiting"
     started = []
     monkeypatch.setattr(game.socketio, "start_background_task",
                         lambda target, *args: started.append(target) or FakeThread())
-    game.tick()
-    alice.emit("progress", {"progress": 100})  # finish, so Start works again
-    alice.emit("game_start")
+    assert alice.emit("game_start", callback=True) == {"ok": True}
     assert attempts == [game.room_clock] and started == [game.room_clock]
 
     class StoppedThread:
@@ -523,17 +541,18 @@ def test_finish_floods_never_take_the_lock(monkeypatch):
     assert counting.entered <= game.FINISH_LIMIT.burst
 
 
-def test_every_progress_update_gets_a_new_version():
-    # with the same version, an older room update arriving late could
-    # overwrite newer progress and make the turtle jump back
+def test_progress_keeps_the_room_version():
+    # With a new version per progress message, one arriving first made
+    # clients drop an older room update: a player joining mid-race lost the
+    # players and status, a player who left stayed on the track.
     alice = connect("alice")
-    bob = connect("bob")
     start(alice)
-    bob.get_received()
+    carol = connect("carol")
+    joined = events(carol, "room_update")[-1]["version"]
     for progress in (10, 20, 30):
         alice.emit("progress", {"progress": progress})
-    versions = [data["version"] for data in events(bob, "progress_percentage")]
-    assert len(versions) == 3 and versions == sorted(set(versions))
+    versions = [data["version"] for data in events(carol, "progress_percentage")]
+    assert versions == [joined] * 3 and game.ROOM_LIST["abc12"]["version"] == joined
 
 
 def test_winner_progress_carries_the_finish_version():
@@ -543,18 +562,11 @@ def test_winner_progress_carries_the_finish_version():
     bob = connect("bob")
     start(alice)
     alice.emit("progress", {"progress": 99})
-    bob.get_received()
+    earlier = events(bob, "progress_percentage")[-1]["version"]
     alice.emit("progress", {"progress": 100})
     received = {msg["name"]: msg["args"][0] for msg in bob.get_received()}
-    earlier = game.ROOM_LIST["abc12"]["version"]
     assert received["progress_percentage"]["progress"] == 100
-    assert received["progress_percentage"]["version"] == received["finish_game"]["version"] == earlier
-    assert received["finish_game"]["version"] > texts_version(alice)
-
-
-def texts_version(client):
-    """Version the race text came with, from the server's log of the room."""
-    return game.ROOM_LIST["abc12"]["version"] - 1
+    assert received["progress_percentage"]["version"] == received["finish_game"]["version"] > earlier
 
 
 def test_messages_are_never_sent_while_holding_the_state_lock(monkeypatch):
@@ -677,6 +689,40 @@ def test_clock_sleeps_until_the_next_deadline(monkeypatch, clock):
     game.tick()
     clock.advance(10)
     assert run_clock_once(monkeypatch) == pytest.approx(game.RACE_SECONDS - 10)
+
+
+def test_clock_sleeps_at_most_an_hour(monkeypatch, clock):
+    # Event.wait() raises OverflowError for a timeout like infinity
+    monkeypatch.setattr(game, "RACE_SECONDS", float("inf"))
+    start(connect("alice"))
+    assert run_clock_once(monkeypatch) == 3600
+
+
+def test_start_wakes_the_clock(monkeypatch):
+    wakeup = threading.Event()
+    monkeypatch.setattr(game, "clock_wakeup", wakeup)
+    alice = connect("alice")
+    assert not wakeup.is_set()
+    alice.emit("game_start")
+    assert wakeup.is_set()
+
+
+def test_an_error_in_one_room_does_not_hold_back_the_others(monkeypatch):
+    alice = connect("alice", room="room1")
+    bob = connect("bob", room="room2")
+    alice.emit("game_start")
+    bob.emit("game_start")
+    real_start_race = game.start_race
+
+    def start_race(room, now, outbox):
+        if room == "room2":
+            raise ValueError("broken room")
+        real_start_race(room, now, outbox)
+
+    monkeypatch.setattr(game, "start_race", start_race)
+    with pytest.raises(ValueError):
+        game.tick()
+    assert texts(alice) == [game.TEXTS["en"]]
 
 
 def test_events_of_a_client_are_handled_in_order():

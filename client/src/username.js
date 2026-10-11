@@ -14,14 +14,10 @@ export const saveUsername = (username) => {
   localStorage.setItem("username", username)
 }
 
-// Same through reloads and reconnects of this tab, different in another tab.
-// The server uses it to replace the tab's old connection instead of counting
-// a second player.
-export const getPlayerId = () => {
-  let id = sessionStorage.getItem("player_id")
-  if (!id) {
-    id = randomRoomCode(16)
-    sessionStorage.setItem("player_id", id)
-  }
-  return id
-}
+// Same through reconnects of this page, like a phone switching networks, so
+// the server replaces the old connection instead of counting a second player.
+// Kept in memory: a duplicated tab copies sessionStorage, and the two tabs
+// would replace each other. A reload closes the old connection anyway.
+const playerId = randomRoomCode(16)
+
+export const getPlayerId = () => playerId

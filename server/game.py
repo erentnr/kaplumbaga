@@ -66,7 +66,7 @@ MAX_USERNAME_LENGTH = 24
 
 # room_id -> {"status": "waiting" | "countdown" | "playing" | "finished",
 #             "language": key of TEXTS,
-#             "version": increases with every change, see bump(),
+#             "version": increases with every change but progress, see bump(),
 #             "players": {sid: {"username": str, "progress": float, "player_id": str | None}},
 #             plus the race fields of race_fields()}
 ROOM_LIST = {}
@@ -252,9 +252,14 @@ def clean_username(value):
     return name if visible else "player"
 
 
+# joiners and variation selectors are invisible next to most letters
+LOOK_ALIKE = str.maketrans(dict.fromkeys(
+    [ord(joiner) for joiner in JOINERS] + list(range(0xFE00, 0xFE10)) + list(range(0xE0100, 0xE01F0))))
+
+
 def looks_like(name):
-    """Joiners are invisible next to most letters: "alice" + joiner looks like "alice"."""
-    return name.translate({ord(joiner): None for joiner in JOINERS})
+    """The name without characters that don't show: "alice" + joiner looks like "alice"."""
+    return name.translate(LOOK_ALIKE)
 
 
 def unique_username(name, players):
@@ -390,13 +395,16 @@ def tick():
     """Send the text of countdowns that are over, end races past the time limit."""
     now = time.monotonic()
     outbox = []
-    with state_lock:
-        for room, state in ROOM_LIST.items():
-            if state["status"] == "countdown" and now >= state["starts_at"]:
-                start_race(room, now, outbox)
-            elif state["status"] == "playing" and now >= state["started_at"] + RACE_SECONDS:
-                finish_race(room, outbox)
-    send(outbox)
+    try:
+        with state_lock:
+            for room, state in ROOM_LIST.items():
+                if state["status"] == "countdown" and now >= state["starts_at"]:
+                    start_race(room, now, outbox)
+                elif state["status"] == "playing" and now >= state["started_at"] + RACE_SECONDS:
+                    finish_race(room, outbox)
+    finally:
+        # rooms changed before an error still get their messages
+        send(outbox)
 
 
 def room_clock():
@@ -406,7 +414,9 @@ def room_clock():
         try:
             with state_lock:
                 deadline = next_deadline()
-            clock_wakeup.wait(None if deadline is None else max(0, deadline - time.monotonic()))
+            # at most an hour, Event.wait() can't take a huge RACE_SECONDS
+            clock_wakeup.wait(None if deadline is None
+                              else min(max(0, deadline - time.monotonic()), 3600))
             # cleared before tick() reads the rooms, so a countdown started meanwhile
             # is either in this tick or wakes the next wait
             clock_wakeup.clear()
@@ -417,7 +427,8 @@ def room_clock():
 
 
 def ensure_clock():
-    """Start the room clock, again if it stopped or couldn't start before."""
+    """Start the room clock, again if it stopped or couldn't start before.
+    Returns whether it runs."""
     global clock_thread
     with clock_lock:
         if clock_thread is None or not clock_thread.is_alive():
@@ -425,6 +436,8 @@ def ensure_clock():
                 clock_thread = socketio.start_background_task(room_clock)
             except RuntimeError:
                 log.exception("can't start the room clock, trying again with the next start")
+                return False
+        return True
 
 
 @app.get("/healthz")
@@ -450,8 +463,11 @@ def handle_disconnect(reason=None, *_):
 def handle_join(data=None, *_):
     if not isinstance(data, dict):
         return {"ok": False, "error": "invalid request"}
-    # codes are lowercase, phone keyboards like to capitalize the first letter
-    room = str(data.get("room_id", "")).strip().lower()
+    # Codes are lowercase, phone keyboards like to capitalize the first letter.
+    # Only ASCII spaces and line breaks are stripped: JavaScript's trim()
+    # strips them too, so the client already uses the same code. Python's
+    # strip() would also drop characters like U+001F, which trim() keeps.
+    room = str(data.get("room_id", "")).strip(" \t\n\r\f\v").lower()
     if not ROOM_ID_PATTERN.fullmatch(room):
         return {"ok": False, "error": "invalid room id"}
     username = clean_username(data.get("username"))
@@ -468,6 +484,8 @@ def handle_join(data=None, *_):
     with state_lock:
         remove_player(user_id, outbox)
         if player_id and room in ROOM_LIST:
+            # removing the old connection deletes the room if it was alone
+            language = ROOM_LIST[room]["language"]
             # this tab reconnected, its old connection would keep the name
             # until the ping timeout
             for old in [sid for sid, player in ROOM_LIST[room]["players"].items()
@@ -517,6 +535,9 @@ def handle_set_language(data=None, *_):
 @socketio.on("game_start")
 @rate_limited(ACTION_LIMIT)
 def handle_game_start(data=None, *_):
+    # without the clock the countdown would never end, and nobody could press Start again
+    if not ensure_clock():
+        return {"ok": False, "error": "server busy, try again"}
     outbox = []
     with state_lock:
         room = PLAYER_ROOMS.get(request.sid)
@@ -532,7 +553,6 @@ def handle_game_start(data=None, *_):
         bump(room)
         queue(outbox, room, "room_update", room_state(room))
     send(outbox)
-    ensure_clock()
     clock_wakeup.set()
     return {"ok": True}
 
@@ -565,8 +585,8 @@ def handle_progress(data=None, *_):
             finish_race(room, outbox, winner_id=user_id)
         else:
             state["players"][user_id]["progress"] = progress
-            # its own version, so an older room update can't overwrite it
-            bump(room)
+            # The room's version, not a new one: a new one made clients drop
+            # an older room update, like the one a player gets when joining.
             queue(outbox, room, "progress_percentage", {
                 "room": room, "user_id": user_id, "progress": progress,
                 "version": state["version"]})

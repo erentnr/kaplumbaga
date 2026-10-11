@@ -308,13 +308,8 @@ const Game = ({socket}) => {
       setIsConnected(true);
       setConnectionFailed(false);
     };
-    const onDisconnect = (reason) => {
-      setIsConnected(false);
-      // socket.io-client reconnects by itself, except when the server closed the connection
-      if (reason === 'io server disconnect') {
-        setFatalError('Disconnected from the game server, reload the page to join again.');
-      }
-    };
+    // socket.io-client reconnects by itself, this server never disconnects a client
+    const onDisconnect = () => setIsConnected(false);
     const onConnectError = () => setConnectionFailed(true);
 
     socket.on('connect', onConnect);
