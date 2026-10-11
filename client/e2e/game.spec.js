@@ -3,6 +3,30 @@ import { test as base, expect } from '@playwright/test'
 const newRoom = () => `e2e${Math.random().toString(36).slice(2, 8)}`
 
 const PHONE = { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true }
+const SMALL_PHONE = { viewport: { width: 375, height: 667 }, isMobile: true, hasTouch: true }
+
+// Stands in for the on-screen keyboard. Browsers report it through
+// window.visualViewport, which test browsers never shrink, so the page gets
+// a fake one. openKeyboard(height, scrolledBy) leaves `height` pixels visible
+// with the page scrolled down by `scrolledBy`, like iOS does to show the input.
+const fakeKeyboard = (page) => page.addInitScript(() => {
+  let keyboard = null
+  const viewport = new EventTarget()
+  // read when asked, the page sizes aren't final before the viewport meta
+  Object.defineProperties(viewport, {
+    width: { get: () => innerWidth },
+    height: { get: () => keyboard?.height ?? innerHeight },
+    offsetTop: { get: () => keyboard?.scrolledBy ?? 0 },
+    offsetLeft: { value: 0 },
+    scale: { value: 1 },
+  })
+  Object.defineProperty(window, 'visualViewport', { value: viewport, configurable: true })
+  window.openKeyboard = (height, scrolledBy) => {
+    keyboard = { height, scrolledBy }
+    viewport.dispatchEvent(new Event('resize'))
+    viewport.dispatchEvent(new Event('scroll'))
+  }
+})
 
 // a player in their own browser context, like a separate device
 async function openPlayer(context, name, room, { viaHome = false, language, beforeGoto } = {}) {
@@ -45,7 +69,7 @@ const test = base.extend({
     const contexts = []
     await provide(async (name, room, options) => {
       // registered before anything can fail, so it is always closed
-      const context = await browser.newContext(options?.phone ? PHONE : {})
+      const context = await browser.newContext(options?.device ?? {})
       contexts.push(context)
       return openPlayer(context, name, room, options)
     })
@@ -431,7 +455,7 @@ test('the room stays on screen, frozen, while the connection is down', async ({ 
 })
 
 test('on a phone the race fills the screen with the input at the bottom', async ({ joinAs }) => {
-  const racer = await joinAs('alice', newRoom(), { phone: true })
+  const racer = await joinAs('alice', newRoom(), { device: PHONE })
   // between races the language and Start sit at the bottom, by the thumbs
   await expect(turtles(racer.page)).toHaveText(['alice'])
   const track = await racer.page.locator('.track').boundingBox()
@@ -452,6 +476,44 @@ test('on a phone the race fills the screen with the input at the bottom', async 
   await expect(message(racer.page)).toHaveText('You won!')
   await expect(startButton(racer.page)).toBeVisible()
   expect(racer.errors).toEqual([])
+})
+
+test('on a small phone with the keyboard open, the text stays in sight', async ({ joinAs }) => {
+  const bottomOf = ({ y, height }) => y + height
+  const room = newRoom()
+  for (const name of ['bob', 'carol', 'dan', 'erin']) await joinAs(name, room)
+  // joins last, so their lane is at the bottom of the track
+  const racer = await joinAs('alice', room, { device: SMALL_PHONE, beforeGoto: fakeKeyboard })
+  await expect(turtles(racer.page)).toHaveCount(5)
+  await startButton(racer.page).click()
+  await expect(input(racer.page)).toBeFocused()
+  // before the keyboard opens, the input sits at the bottom of the screen
+  expect(667 - bottomOf(await input(racer.page).boundingBox())).toBeLessThan(40)
+  await racer.page.evaluate(() => window.openKeyboard(300, 260))
+
+  const box = (locator) => locator.boundingBox()
+  // boxes scroll after a resize, give them a moment
+  const within = (inner, outer) => expect(async () => {
+    const [a, b] = [await box(inner), await box(outer)]
+    expect(a.y).toBeGreaterThanOrEqual(b.y - 1)
+    expect(bottomOf(a)).toBeLessThanOrEqual(bottomOf(b) + 1)
+  }).toPass({ timeout: 2000 })
+  // the room covers exactly what the keyboard leaves visible
+  const visible = await box(racer.page.locator('.room'))
+  expect(visible.y).toBeCloseTo(260, 0)
+  expect(visible.height).toBeCloseTo(300, 0)
+  // a couple of lines of text, your lane, and the input all fit
+  const text = racer.page.locator('.race-text')
+  expect((await box(text)).height).toBeGreaterThanOrEqual(80)
+  await within(text, racer.page.locator('.room'))
+  await within(input(racer.page), racer.page.locator('.room'))
+  await within(racer.page.locator('.lane-me'), racer.page.locator('.lanes'))
+  // the word to type stays in the text box as the race goes on
+  const all = await words(racer.page).allTextContents()
+  for (let i = 0; i < all.length - 3; i++) {
+    await input(racer.page).pressSequentially(`${all[i]} `)
+    await within(racer.page.locator('.w-cur'), text)
+  }
 })
 
 test('a tab that reconnects keeps its name', async ({ joinAs }) => {

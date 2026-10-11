@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef } from "react";
+import { Fragment, useState, useEffect, useLayoutEffect, useRef } from "react";
 import { Link, useParams } from "react-router";
 
 import '../Game.css';
@@ -17,6 +17,16 @@ const wordAt = (words, text, progress) => {
   let index = 0
   while (index < words.length - 1 && progressAt(words, text, index + 1) <= progress) index++
   return index
+}
+
+// Scrolls `box` alone, never the page, so that `item` in it is in sight.
+// `at` places it, as a fraction of the room left in the box.
+const scrollIntoBox = (box, item, at) => {
+  if (!box || !item || box.scrollHeight <= box.clientHeight) return
+  const { offsetTop, offsetHeight } = item
+  if (offsetTop < box.scrollTop || offsetTop + offsetHeight > box.scrollTop + box.clientHeight) {
+    box.scrollTop = offsetTop - (box.clientHeight - offsetHeight) * at
+  }
 }
 
 // more players than this get narrower lanes
@@ -106,13 +116,25 @@ const Countdown = ({secondsLeft, total}) => {
 }
 
 const Track = ({players, myID, winnerID, status, children}) => {
+  const lanesRef = useRef(null)
+  const myLaneRef = useRef(null)
   const entries = Object.entries(players)
+
+  // a track that scrolls (a full room, a phone with the keyboard open)
+  // keeps your own lane in sight
+  useEffect(() => {
+    const lanes = lanesRef.current
+    const observer = new ResizeObserver(() => scrollIntoBox(lanes, myLaneRef.current, 1 / 2))
+    observer.observe(lanes)
+    return () => observer.disconnect()
+  }, []);
+
   let className = 'track'
   if (entries.length > ROOMY_LANES) className += ' is-crowded'
   if (status === 'playing') className += ' is-racing'
   return (
     <section className={className} aria-label="Race track">
-      <div className="lanes">
+      <div className="lanes" ref={lanesRef}>
         {entries.map(([id, player]) => {
           // left edge on the start line at 0%, right edge on the finish line at 100%
           const progress = player.progress || 0
@@ -122,7 +144,7 @@ const Track = ({players, myID, winnerID, status, children}) => {
           if (isMe) laneClass += ' lane-me'
           if (won) laneClass += ' lane-win'
           return (
-            <div className={laneClass} key={id}>
+            <div className={laneClass} key={id} ref={isMe ? myLaneRef : undefined}>
               <div className="lane-name">
                 <span className="tag" title={player.username}>{player.username}</span>
               </div>
@@ -298,32 +320,41 @@ const Race = ({socket, roomID, connected, connectionFailed, onFatalError}) => {
   // this player races, as opposed to watching a race that started without them
   const racing = status === 'playing' && words.length > 0
 
-  // On phones the race fills the screen above the keyboard (see Game.css).
-  // The visual viewport is what's left over by the keyboard, also in
-  // browsers that don't shrink 100dvh for it.
+  // On phones the race covers the part of the screen you can see (see
+  // Game.css). With the keyboard open that's the visual viewport: shorter
+  // than the page, and further down when the browser scrolled to show the
+  // input, as iOS does. Browsers that don't shrink 100dvh for the keyboard
+  // still report it here.
   useEffect(() => {
     const viewport = window.visualViewport
     if (!racing || !viewport) return
     const root = document.documentElement
-    const update = () => root.style.setProperty('--viewport-height', `${viewport.height}px`)
+    const update = () => {
+      root.style.setProperty('--viewport-height', `${viewport.height}px`)
+      root.style.setProperty('--viewport-top', `${viewport.offsetTop}px`)
+    }
     update()
     viewport.addEventListener('resize', update)
+    viewport.addEventListener('scroll', update)
     return () => {
       viewport.removeEventListener('resize', update)
+      viewport.removeEventListener('scroll', update)
       root.style.removeProperty('--viewport-height')
+      root.style.removeProperty('--viewport-top')
     }
   }, [racing]);
 
-  // where the text box scrolls (phones), keep the word being typed in it,
-  // a third of the way down. Only the box scrolls, never the page.
-  useEffect(() => {
+  // where the text box scrolls (phones), keep the word being typed in it, a
+  // third of the way down, also when the keyboard opens and the box shrinks.
+  // Before the word is drawn, so it never shows hidden for a frame.
+  useLayoutEffect(() => {
     const box = textRef.current
-    const word = currentWordRef.current
-    if (!racing || !box || !word || box.scrollHeight <= box.clientHeight) return
-    const { offsetTop, offsetHeight } = word
-    if (offsetTop < box.scrollTop || offsetTop + offsetHeight > box.scrollTop + box.clientHeight) {
-      box.scrollTop = offsetTop - box.clientHeight / 3
-    }
+    if (!racing || !box) return
+    const keepInView = () => scrollIntoBox(box, currentWordRef.current, 1 / 3)
+    keepInView()
+    const observer = new ResizeObserver(keepInView)
+    observer.observe(box)
+    return () => observer.disconnect()
   }, [racing, current]);
 
   const showRefusal = (response) => {
