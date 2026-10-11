@@ -133,6 +133,7 @@
 
 /* a full room scrolls instead of pushing the text away */
 .lanes {
+  position: relative;
   max-height: 600px;
   overflow-y: auto;
 }
@@ -619,16 +620,22 @@
     font-size: 20px;
   }
 
-  /* Racing: the room fills the screen above the keyboard, the text scrolls
-     and the input stays at the bottom. Only the status and the room code
-     stay from the top, and the track gets compact. */
+  /* Racing: the room covers the part of the screen you can see, above the
+     keyboard, wherever the browser scrolled the page to (Race sets the
+     variables). The text scrolls and the input stays at the bottom. Only
+     the status and the room code stay from the top, and the track gets
+     compact. */
   .room.is-typing {
+    position: fixed;
+    top: var(--viewport-top, 0px);
+    right: 0;
+    left: 0;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-rows: auto auto minmax(0, 1fr) auto;
-    gap: 10px;
+    gap: 8px;
     height: var(--viewport-height, 100dvh);
-    padding: 12px 14px;
+    padding: 10px 12px;
   }
 
   .room.is-typing .room-header {
@@ -678,9 +685,10 @@
     box-shadow: none;
   }
 
-  /* about five lanes, the text needs the room */
+  /* at most five lanes, and less of the screen with the keyboard open: the
+     text needs the room more */
   .room.is-typing .lanes {
-    max-height: calc(var(--lane-h) * 5 + 8px);
+    max-height: min(calc(var(--lane-h) * 5 + 8px), calc(var(--viewport-height, 100dvh) * .22));
   }
 
   .room.is-typing .lane-name {
@@ -697,11 +705,21 @@
     grid-area: 3 / 1 / 4 / -1;
     min-height: 0;
     overflow-y: auto;
-    padding: 12px 10px;
+    padding: 10px;
   }
 
   .room.is-typing .typing {
     grid-area: 4 / 1 / 5 / -1;
+    gap: 0;
+  }
+
+  /* the red input and word say it, a line coming and going would move the text */
+  .room.is-typing .typo-hint {
+    display: none;
+  }
+
+  .room.is-typing .typing-field {
+    min-height: 48px;
   }
 
   .room.is-typing .typing-head label {
