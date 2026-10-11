@@ -45,9 +45,13 @@ const Home = () => {
     setShowModal(false)
   }
 
+  const handleCloseModal = () => {
+    setShowModal(false)
+  }
+
   return (
     <div className="main">
-      <Modal showModal={showModal} onSave={handleSaveUsername} />
+      <Modal showModal={showModal} onSave={handleSaveUsername} onClose={handleCloseModal} />
       <div className="home-header">
        <img className="kaplumbaga" alt="" src={TurtleSvg} />
        <div className="header-title">

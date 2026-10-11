@@ -1,17 +1,18 @@
 import { randomInt, randomRoomCode } from './random'
+import { load, save } from './storage'
 
 // returns the saved username, creates a random one on the first visit
 export const getUsername = () => {
-  let username = localStorage.getItem("username")
+  let username = load("username")
   if (!username) {
     username = `player${randomInt(1000)}`
-    localStorage.setItem("username", username)
+    save("username", username)
   }
   return username
 }
 
 export const saveUsername = (username) => {
-  localStorage.setItem("username", username)
+  save("username", username)
 }
 
 // Same through reconnects of this page, like a phone switching networks, so

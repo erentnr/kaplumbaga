@@ -64,6 +64,10 @@ ROOM_ID_PATTERN = re.compile(r"[a-z0-9_-]{1,32}")
 PLAYER_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,64}")
 MAX_USERNAME_LENGTH = 24
 
+# Every player gets every progress message of their room, so the messages
+# sent grow with the square of the room size. Enough for a classroom.
+MAX_PLAYERS_PER_ROOM = 30
+
 # room_id -> {"status": "waiting" | "countdown" | "playing" | "finished",
 #             "language": key of TEXTS,
 #             "version": increases with every change but progress, see bump(),
@@ -72,9 +76,12 @@ MAX_USERNAME_LENGTH = 24
 ROOM_LIST = {}
 # sid -> room_id, every socket is in at most one room
 PLAYER_ROOMS = {}
-# Guards ROOM_LIST and PLAYER_ROOMS. Never send while holding it: sending to
-# a socket that stopped answering pings closes it, and engineio runs
-# handle_disconnect in the same thread, which needs this lock.
+# sids of the open sockets. A socket can disconnect on another thread while
+# its join waits for the lock, the join must not add it then.
+CONNECTED = set()
+# Guards ROOM_LIST, PLAYER_ROOMS and CONNECTED. Never send while holding it:
+# sending to a socket that stopped answering pings closes it, and engineio
+# runs handle_disconnect in the same thread, which needs this lock.
 state_lock = threading.Lock()
 versions = itertools.count(1)
 clock_lock = threading.Lock()
@@ -127,8 +134,8 @@ PROGRESS_LIMIT = RateLimiter(rate=30, burst=60)
 # a finish is one message per race, its own small limit keeps it from being
 # dropped by a burst of keystrokes without letting a flood of them through
 FINISH_LIMIT = RateLimiter(rate=1, burst=3)
-# per socket: join, game_start and set_language. leave is never limited, a
-# dropped leave would keep a player in the room.
+# per socket: join, leave, game_start and set_language. A dropped leave does
+# no harm, the client follows it with a join or a disconnect, both leave too.
 ACTION_LIMIT = RateLimiter(rate=1, burst=10)
 
 # Every open websocket holds one gunicorn thread until it closes. Keep the
@@ -178,6 +185,13 @@ class ConnectionLimits:
     def __call__(self, environ, start_response):
         if not environ.get("PATH_INFO", "").startswith("/socket.io"):
             return self.wsgi_app(environ, start_response)
+        origin = environ.get("HTTP_ORIGIN")
+        if origin is not None and origin not in CORS_ORIGINS:
+            # A page on another site, socket.io would refuse it too. Refused
+            # here before it's counted, so it can't use up the connection
+            # allowance of the address its visitors share, like a school's.
+            start_response("403 Forbidden", [("Content-Type", "text/plain")])
+            return [b"origin not allowed\n"]
         key = client_key(environ)
         with self.lock:
             allowed = (self.total < MAX_SOCKETS
@@ -326,9 +340,13 @@ def queue(outbox, room, event, data):
 def send(outbox):
     """Send messages queued under state_lock, after releasing it."""
     for event, data, recipients in outbox:
-        # an empty list would make socket.io send to everyone
-        if recipients:
-            socketio.emit(event, data, to=recipients)
+        # One at a time: a socket that finishes closing on another thread
+        # raises, and must not cost everyone after it this message and the rest.
+        for sid in recipients:
+            try:
+                socketio.emit(event, data, to=sid)
+            except Exception:
+                log.exception("can't send %s to %s", event, sid)
 
 
 def start_race(room, now, outbox):
@@ -382,6 +400,54 @@ def remove_player(user_id, outbox):
     return room
 
 
+def take_over(room, old, new):
+    """Give the player of socket `old` to socket `new`, the same tab
+    reconnected: it keeps its name, lane, race and win. Hold state_lock."""
+    state = ROOM_LIST[room]
+    # rebuilt in the same order, so the lanes stay where they were
+    state["players"] = {(new if sid == old else sid): player
+                        for sid, player in state["players"].items()}
+    del PLAYER_ROOMS[old]
+    PLAYER_ROOMS[new] = room
+    if old in state["racers"]:
+        state["racers"].discard(old)
+        state["racers"].add(new)
+    if state["winner_id"] == old:
+        state["winner_id"] = new
+
+
+def add_player(room, user_id, username, player_id, language, outbox):
+    """Put a socket in a room, it leaves its current one. Hold state_lock.
+    Returns an error message, None when it joined."""
+    if user_id not in CONNECTED:
+        # it disconnected while this join waited for the lock, nothing would
+        # remove a player added now
+        return "not connected"
+    remove_player(user_id, outbox)
+    state = ROOM_LIST.get(room)
+    # this tab reconnected, its old socket stays until the ping timeout
+    old = next((sid for sid, player in state["players"].items()
+                if player["player_id"] == player_id), None) if state and player_id else None
+    if old:
+        take_over(room, old, user_id)
+    elif state and len(state["players"]) >= MAX_PLAYERS_PER_ROOM:
+        return "room is full"
+    else:
+        if state is None:
+            state = ROOM_LIST[room] = new_room(language)
+        state["players"][user_id] = {"progress": 0, "player_id": player_id,
+                                     "username": unique_username(username, state["players"])}
+        PLAYER_ROOMS[user_id] = room
+    bump(room)
+    if user_id in state["racers"]:
+        # a racer who reconnected gets the text again and types on from
+        # their progress, the last argument
+        outbox.append(("load_text", (state["text"], state["version"], room,
+                                     state["players"][user_id]["progress"]), [user_id]))
+    queue(outbox, room, "room_update", room_state(room))
+    return None
+
+
 def next_deadline():
     """When the clock has something to do: the earliest countdown end or race
     time limit, None without either. Hold state_lock."""
@@ -398,10 +464,19 @@ def tick():
     try:
         with state_lock:
             for room, state in ROOM_LIST.items():
-                if state["status"] == "countdown" and now >= state["starts_at"]:
-                    start_race(room, now, outbox)
-                elif state["status"] == "playing" and now >= state["started_at"] + RACE_SECONDS:
-                    finish_race(room, outbox)
+                try:
+                    if state["status"] == "countdown" and now >= state["starts_at"]:
+                        start_race(room, now, outbox)
+                    elif state["status"] == "playing" and now >= state["started_at"] + RACE_SECONDS:
+                        finish_race(room, outbox)
+                except Exception:
+                    # A broken room must not hold back the rooms after it. It
+                    # goes back to waiting, or its passed deadline would wake
+                    # the clock again right away.
+                    log.exception("room %s failed, back to waiting", room)
+                    state.update(status="waiting", **race_fields())
+                    bump(room)
+                    queue(outbox, room, "room_update", room_state(room))
     finally:
         # rooms changed before an error still get their messages
         send(outbox)
@@ -448,10 +523,17 @@ def healthz():
 
 # Handlers take *_ so extra arguments from a client don't raise TypeError.
 
+@socketio.on("connect")
+def handle_connect(auth=None, *_):
+    with state_lock:
+        CONNECTED.add(request.sid)
+
+
 @socketio.on("disconnect")
 def handle_disconnect(reason=None, *_):
     outbox = []
     with state_lock:
+        CONNECTED.discard(request.sid)
         remove_player(request.sid, outbox)
     send(outbox)
     for limiter in (PROGRESS_LIMIT, FINISH_LIMIT, ACTION_LIMIT):
@@ -479,32 +561,15 @@ def handle_join(data=None, *_):
     if not isinstance(language, str) or language not in TEXTS:
         language = DEFAULT_LANGUAGE
 
-    user_id = request.sid
     outbox = []
     with state_lock:
-        remove_player(user_id, outbox)
-        if player_id and room in ROOM_LIST:
-            # removing the old connection deletes the room if it was alone
-            language = ROOM_LIST[room]["language"]
-            # this tab reconnected, its old connection would keep the name
-            # until the ping timeout
-            for old in [sid for sid, player in ROOM_LIST[room]["players"].items()
-                        if player["player_id"] == player_id]:
-                remove_player(old, outbox)
-        if room not in ROOM_LIST:
-            ROOM_LIST[room] = new_room(language)
-        players = ROOM_LIST[room]["players"]
-        players[user_id] = {"progress": 0, "player_id": player_id,
-                            "username": unique_username(username, players)}
-        PLAYER_ROOMS[user_id] = room
-        bump(room)
-        queue(outbox, room, "room_update", room_state(room))
+        error = add_player(room, request.sid, username, player_id, language, outbox)
     send(outbox)
-    # the room code as the server spells it, clients compare messages with it
-    return {"ok": True, "room": room}
+    return {"ok": False, "error": error} if error else {"ok": True}
 
 
 @socketio.on("leave")
+@rate_limited(ACTION_LIMIT)
 def handle_leave(data=None, *_):
     outbox = []
     with state_lock:

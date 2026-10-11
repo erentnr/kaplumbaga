@@ -1,3 +1,5 @@
+import { load, save } from './storage'
+
 // race text languages, the texts themselves live on the server
 export const LANGUAGES = [
   { code: 'tr', name: 'Türkçe' },
@@ -12,7 +14,7 @@ const isSupported = (code) => LANGUAGES.some(language => language.code === code)
 
 // language for rooms this player creates: last picked one, else the browser's
 export const getPreferredLanguage = () => {
-  const saved = localStorage.getItem("language")
+  const saved = load("language")
   if (isSupported(saved)) return saved
   for (const tag of navigator.languages || []) {
     const code = tag.slice(0, 2).toLowerCase()
@@ -22,5 +24,5 @@ export const getPreferredLanguage = () => {
 }
 
 export const savePreferredLanguage = (code) => {
-  localStorage.setItem("language", code)
+  save("language", code)
 }

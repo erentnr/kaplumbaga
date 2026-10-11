@@ -7,6 +7,19 @@ import TurtleSvg from '../assets/turtle.svg';
 import { getPlayerId, getUsername } from '../username';
 import { LANGUAGES, getPreferredLanguage, savePreferredLanguage } from '../languages';
 
+// the word to type next at `progress` percent of the text, counted like
+// sendProgress counts it
+const wordAt = (text, progress) => {
+  const words = text.split(" ")
+  let typed = 0
+  let index = 0
+  while (index < words.length - 1 && ((typed + words[index].length + 1) / text.length) * 100 <= progress) {
+    typed += words[index].length + 1
+    index++
+  }
+  return index
+}
+
 // One race room. Mounted again after every reconnection, so a new socket
 // starts with a clean state.
 const Race = ({socket, roomID, onFatalError}) => {
@@ -32,10 +45,12 @@ const Race = ({socket, roomID, onFatalError}) => {
     // out of order. Each carries its room and the room version it was made
     // from, drop anything older than what was already seen. Messages without
     // them come from an older server (a rolled back deploy) and are kept.
-    let joinedRoom = roomID
     let latestVersion = 0
+    // version of the last countdown, a text older than it is from an earlier race
+    let countdownVersion = 0
+    const isOtherRoom = (room) => room !== undefined && room !== roomID
     const isStale = (room, version) => {
-      if (room !== undefined && room !== joinedRoom) return true
+      if (isOtherRoom(room)) return true
       if (version === undefined) return false
       if (version < latestVersion) return true
       latestVersion = version
@@ -45,13 +60,22 @@ const Race = ({socket, roomID, onFatalError}) => {
     // players, game status, winner and text language of the room
     const onRoomUpdate = (state) => {
       if (isStale(state.room, state.version)) return
-      setCompetitors(state.players)
+      // Progress messages carry the room's version and are always made after
+      // the room update of that version, but can arrive before it. Keep the
+      // progress they brought.
+      setCompetitors(prev => Object.fromEntries(Object.entries(state.players).map(([id, player]) => [
+        id,
+        state.version !== undefined && prev[id]?.version === state.version
+          ? {...player, progress: prev[id].progress, version: state.version}
+          : player,
+      ])))
       setStatus(state.status)
       setWinner(state.winner)
       setWinnerID(state.winner_id)
       setLanguage(state.language)
       if (state.status === 'countdown') {
         // a new race is about to start, clear the previous one
+        countdownVersion = state.version ?? 0
         setCountdownEnd(Date.now() + state.starts_in * 1000)
         setNow(Date.now())
         setRandomText('')
@@ -61,15 +85,15 @@ const Race = ({socket, roomID, onFatalError}) => {
         setCountdownEnd(null)
       }
     }
-    // get the text sent from server, reset typing state for the new game
-    const onLoadText = (text, version, room) => {
-      if (isStale(room, version)) return
+    // The race text, sent once to every racer. Kept even when newer messages
+    // came first, like the update of a player joining as the race started,
+    // unless it's from an earlier race. The room updates set the status.
+    const onLoadText = (text, version, room, progress = 0) => {
+      if (isOtherRoom(room) || (version !== undefined && version < countdownVersion)) return
       setRandomText(text)
-      setCurrent(0)
+      // a racer who reconnected types on from where they were
+      setCurrent(wordAt(text, progress))
       setUserInput('')
-      setWinner(null)
-      setWinnerID(null)
-      setStatus('playing')
     }
     // get current progress of a competitor
     const onProgress = (data) => {
@@ -80,6 +104,7 @@ const Race = ({socket, roomID, onFatalError}) => {
           [data.user_id]: {
             ...prev[data.user_id],
             progress: data.progress,
+            version: data.version,
           }
         })
       )
@@ -107,12 +132,7 @@ const Race = ({socket, roomID, onFatalError}) => {
         // a reconnecting tab replaces its old connection, and keeps its name
         player_id: getPlayerId(),
       }, (response) => {
-        if (!active) return
-        if (response?.ok) {
-          // the room code as the server spells it
-          if (response.room) joinedRoom = response.room
-          return
-        }
+        if (!active || response?.ok) return
         if (response?.error === 'too many requests') {
           // rate limited, try again in a moment instead of giving up
           retryTimer = setTimeout(join, 2000)

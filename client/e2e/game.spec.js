@@ -71,10 +71,32 @@ const turtleOffsets = (page, name) => page.locator('.kaplumbaga-wrapper', { hasT
   })
 const turtleLeft = async (page, name) => (await turtleOffsets(page, name)).fromStart
 
-async function typeWholeText(page) {
+async function typeWholeText(page, from = 0) {
   const all = await words(page).allTextContents()
-  for (let i = 0; i < all.length; i++) {
+  for (let i = from; i < all.length; i++) {
     await input(page).pressSequentially(i < all.length - 1 ? `${all[i]} ` : all[i])
+  }
+}
+
+// Routes a page's socket through the test: server messages for which
+// `isHeld` returns true wait until release(). Call before the page loads.
+async function holdServerMessages(page, isHeld) {
+  const held = []
+  let route
+  let holding = true
+  await page.routeWebSocket(/socket\.io/, (ws) => {
+    route = ws
+    ws.connectToServer().onMessage((message) => {
+      if (holding && isHeld(String(message))) held.push(message)
+      else ws.send(message)
+    })
+  })
+  return {
+    held,
+    release: () => {
+      holding = false
+      held.splice(0).forEach((message) => route.send(message))
+    },
   }
 }
 
@@ -224,6 +246,31 @@ test('a long name keeps the turtle inside the track', async ({ joinAs }) => {
   expect((await turtleOffsets(racer.page, longName)).labelToFinish).toBeGreaterThanOrEqual(0)
 })
 
+test('a classroom fits on the track', async ({ joinAs }) => {
+  // the track had a fixed height, more than ~8 players overlapped the text
+  const room = newRoom()
+  const teacher = await joinAs('teacher', room)
+  for (let i = 1; i < 12; i++) {
+    // tabs of one browser, each its own player
+    await teacher.context.newPage().then((page) => page.goto(`/play/${room}`))
+  }
+  await expect(turtles(teacher.page)).toHaveCount(12)
+  const layout = await teacher.page.evaluate(() => {
+    const box = (element) => element.getBoundingClientRect()
+    const track = box(document.querySelector('.kaplumbaga-race'))
+    const lanes = [...document.querySelectorAll('.kaplumbaga-wrapper')].map(box)
+    return {
+      top: track.top, bottom: track.bottom,
+      lanesTop: Math.min(...lanes.map((lane) => lane.top)),
+      lanesBottom: Math.max(...lanes.map((lane) => lane.bottom)),
+      textTop: box(document.querySelector('.game-text')).top,
+    }
+  })
+  expect(layout.lanesTop).toBeGreaterThanOrEqual(layout.top)
+  expect(layout.lanesBottom).toBeLessThanOrEqual(layout.bottom)
+  expect(layout.bottom).toBeLessThanOrEqual(layout.textTop)
+})
+
 test('room codes ignore case and a pasted invite link works', async ({ joinAs, baseURL }) => {
   const room = newRoom()
   const alice = await joinAs('alice', room)
@@ -250,6 +297,128 @@ test('a room address with a trailing line break still works', async ({ joinAs })
   await startButton(bob.page).click()
   await expect(words(alice.page).first()).toBeVisible()
   await expect(words(bob.page).first()).toBeVisible()
+})
+
+test('the race text still shows when a newer update came first', async ({ joinAs }) => {
+  // The text is sent once. When the update of a player joining just then
+  // arrived first, the client dropped the text as old and bob couldn't type.
+  const room = newRoom()
+  const alice = await joinAs('alice', room)
+  let messages
+  const bob = await joinAs('bob', room, {
+    beforeGoto: async (page) => {
+      messages = await holdServerMessages(page, (message) => message.startsWith('42["load_text"'))
+    },
+  })
+  await expect(turtles(alice.page)).toHaveText(['alice', 'bob'])
+  await startButton(alice.page).click()
+  await expect.poll(() => messages.held.length).toBe(1)
+  await joinAs('carol', room)
+  await expect(turtles(bob.page)).toHaveText(['alice', 'bob', 'carol'])
+  messages.release()
+  await expect(input(bob.page)).toBeEnabled()
+  await typeWholeText(bob.page)
+  await expect(message(alice.page)).toHaveText('bob won!')
+})
+
+test('an update that arrives late never moves a turtle back', async ({ joinAs }) => {
+  // progress carries the room's version, an older update of the same
+  // version was taken as newer and put alice's turtle back at the start
+  const room = newRoom()
+  const alice = await joinAs('alice', room)
+  let messages
+  const bob = await joinAs('bob', room, {
+    beforeGoto: async (page) => {
+      messages = await holdServerMessages(page, (message) => message.includes('"carol"'))
+    },
+  })
+  await startButton(alice.page).click()
+  await expect(input(alice.page)).toBeEnabled()
+  await joinAs('carol', room)
+  await expect.poll(() => messages.held.length).toBe(1)
+  const firstWord = await words(alice.page).first().textContent()
+  await input(alice.page).pressSequentially(`${firstWord} `)
+  const aliceLeft = () => bob.page.locator('.kaplumbaga-wrapper', { hasText: 'alice' })
+    .locator('.kaplumbaga').evaluate((turtle) => turtle.style.left)
+  await expect.poll(aliceLeft).not.toBe('0%')
+  const moved = await aliceLeft()
+  messages.release()
+  await expect(turtles(bob.page)).toHaveText(['alice', 'bob', 'carol'])
+  expect(await aliceLeft()).toBe(moved)
+})
+
+test('a racer who reconnects types on from where they were', async ({ joinAs }) => {
+  const room = newRoom()
+  const alice = await joinAs('alice', room)
+  const connections = []
+  const bob = await joinAs('bob', room, {
+    beforeGoto: (page) => page.routeWebSocket(/socket\.io/, (ws) => {
+      connections.push(ws)
+      ws.onClose(() => {})
+      ws.connectToServer().onClose(() => {})
+    }),
+  })
+  await startButton(alice.page).click()
+  await expect(input(bob.page)).toBeEnabled()
+  const [first, second] = await words(bob.page).allTextContents()
+  await input(bob.page).pressSequentially(`${first} ${second} `)
+  await expect(words(bob.page).nth(1)).toHaveClass('correct')
+  // the server keeps the old connection until its ping timeout
+  await connections[0].close()
+  await expect.poll(() => connections.length).toBe(2)
+  await expect(input(bob.page)).toBeEnabled()
+  await expect(words(bob.page).nth(1)).toHaveClass('correct')
+  await expect(words(bob.page).nth(2)).toHaveClass('current')
+  await typeWholeText(bob.page, 2)
+  await expect(message(bob.page)).toHaveText('You won!')
+  await expect(message(alice.page)).toHaveText('bob won!')
+})
+
+test('works when the browser blocks site data', async ({ browser }) => {
+  // localStorage throws then, the app went blank
+  const context = await browser.newContext()
+  await context.addInitScript(() => {
+    Object.defineProperty(window, 'localStorage', {
+      get() { throw new DOMException('The operation is insecure.', 'SecurityError') },
+    })
+  })
+  const page = await context.newPage()
+  const errors = []
+  page.on('pageerror', (error) => errors.push(error.message))
+  await page.goto('/')
+  await page.click('.change-username')
+  await page.fill('.username-input', 'dana')
+  await page.click('.username-save-button')
+  await expect(page.getByText(/^Joining as dana\./)).toBeVisible()
+  // kept for the rest of the visit
+  await page.click('input[value="Create Game"]')
+  await expect(turtles(page)).toHaveText(['dana'])
+  expect(errors).toEqual([])
+  await context.close()
+})
+
+test('the username dialog can be closed without saving', async ({ page }) => {
+  await page.goto('/')
+  const dialog = page.locator('.modal-main')
+  const joiningAs = page.getByText(/^Joining as /)
+  const before = await joiningAs.textContent()
+  for (const close of [
+    () => page.click('input[value="Cancel"]'),
+    () => page.keyboard.press('Escape'),
+    () => page.mouse.click(5, 5),  // outside the dialog
+  ]) {
+    await page.click('.change-username')
+    await expect(page.locator('.username-input')).toBeFocused()
+    await close()
+    await expect(dialog).toBeHidden()
+  }
+  await expect(joiningAs).toHaveText(before)
+  // Enter saves
+  await page.click('.change-username')
+  await page.keyboard.type('erin')
+  await page.keyboard.press('Enter')
+  await expect(dialog).toBeHidden()
+  await expect(joiningAs).toHaveText(/^Joining as erin\./)
 })
 
 test('a tab that reconnects keeps its name', async ({ joinAs }) => {

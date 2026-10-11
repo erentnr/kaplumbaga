@@ -6,7 +6,10 @@
 .kaplumbaga-race {
   position: relative;
   background-color: #5D8AA6;
-  height:350px;
+  /* grows when the players need more room */
+  min-height: 350px;
+  padding: 10px 0;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   justify-content: space-around;
@@ -29,6 +32,7 @@
 
 .kaplumbaga-wrapper p {
   display: flex;
+  margin: 0 0 4px;
   width: fit-content;
   max-width: 50%;
   white-space: pre;

@@ -5,6 +5,7 @@ import time
 import unicodedata
 
 import pytest
+from engineio.exceptions import SocketIsClosedError
 from werkzeug.test import EnvironBuilder
 
 import game
@@ -23,7 +24,8 @@ MAN, WOMAN, GIRL = chr(0x1F468), chr(0x1F469), chr(0x1F467)
 
 
 def reset_state():
-    for state in (game.ROOM_LIST, game.PLAYER_ROOMS, game.connection_limits.per_client):
+    for state in (game.ROOM_LIST, game.PLAYER_ROOMS, game.CONNECTED,
+                  game.connection_limits.per_client):
         state.clear()
     game.connection_limits.total = 0
     game.clock_thread = None
@@ -72,6 +74,14 @@ def connect(username, room="abc12", language=None):
     if language:
         data["language"] = language
     assert client.emit("join", data, callback=True)["ok"] is True
+    return client
+
+
+def tab(username, player_id, room="abc12"):
+    """A browser tab with its id, joined to the room."""
+    client = game.socketio.test_client(game.app)
+    data = {"room_id": room, "username": username, "player_id": player_id}
+    assert client.emit("join", data, callback=True) == {"ok": True}
     return client
 
 
@@ -142,12 +152,10 @@ def test_room_id_is_trimmed_like_the_client_trims_it():
         "ok": False, "error": "invalid room id"}
 
 
-def test_join_reply_has_the_room_as_the_server_spells_it():
-    # clients compare the room of every message with it, a URL like
-    # /play/abc%0A would otherwise never match
+def test_room_code_is_trimmed_and_lowercased():
     client = game.socketio.test_client(game.app)
     reply = client.emit("join", {"room_id": " Abc12" + NEWLINE, "username": "x"}, callback=True)
-    assert reply == {"ok": True, "room": "abc12"}
+    assert reply == {"ok": True} and list(game.ROOM_LIST) == ["abc12"]
 
 
 def test_room_codes_are_not_case_sensitive():
@@ -181,7 +189,7 @@ def test_events_with_extra_arguments_do_not_crash(event, caplog):
 def test_join_with_a_non_string_language_uses_the_default():
     client = game.socketio.test_client(game.app)
     data = {"room_id": "abc12", "username": "alice", "language": ["tr"]}
-    assert client.emit("join", data, callback=True) == {"ok": True, "room": "abc12"}
+    assert client.emit("join", data, callback=True) == {"ok": True}
     assert game.ROOM_LIST["abc12"]["language"] == game.DEFAULT_LANGUAGE
 
 
@@ -272,9 +280,73 @@ def test_a_reconnecting_tab_that_was_alone_keeps_the_room():
     new = game.socketio.test_client(game.app)
     reply = new.emit("join", {"room_id": "abc12", "username": "alice", "player_id": "tab-12345678",
                               "language": "en"}, callback=True)
-    assert reply == {"ok": True, "room": "abc12"} and names() == ["alice"]
+    assert reply == {"ok": True} and names() == ["alice"]
     # removing the old connection emptied the room, it came back in English
     assert game.ROOM_LIST["abc12"]["language"] == "de"
+
+
+def test_a_reconnecting_racer_stays_in_the_race():
+    # The old socket was removed: the player lost their place in the race
+    # and, as the only racer, ended it with nobody finishing.
+    old = tab("alice", "tab-12345678")
+    bob = connect("bob")
+    start(old)
+    bob.emit("leave")
+    bob = connect("bob")  # watches
+    old.emit("progress", {"progress": 40})
+    bob.get_received()
+    new = tab("alice", "tab-12345678")
+    assert status() == "playing" and finishes(bob) == []
+    received = new.get_received()
+    # the text again, with the progress to type on from
+    assert [msg["name"] for msg in received] == ["load_text", "room_update"]
+    text, version, room, progress = received[0]["args"]
+    assert (text, room, progress) == (game.TEXTS["en"], "abc12", 40)
+    assert version == received[1]["args"][0]["version"]
+    new.emit("progress", {"progress": 100})
+    assert game.ROOM_LIST["abc12"]["winner_id"] == sid(new)
+
+
+def test_a_reconnecting_tab_keeps_its_lane_and_win():
+    old = tab("alice", "tab-12345678")
+    connect("bob")
+    start(old)
+    old.emit("progress", {"progress": 100})
+    new = tab("alice", "tab-12345678")
+    state = events(new, "room_update")[-1]
+    assert [player["username"] for player in state["players"].values()] == ["alice", "bob"]
+    assert state["status"] == "finished" and state["winner_id"] == sid(new)
+    assert state["players"][sid(new)]["progress"] == 100
+
+
+def test_a_join_that_finishes_after_its_socket_closed_adds_nobody(monkeypatch):
+    # The socket times out on another thread while its join runs: the
+    # disconnect finds nothing to remove, and the join then added a player
+    # nobody would ever remove.
+    client = game.socketio.test_client(game.app)
+    clean_username = game.clean_username
+
+    def disconnect_meanwhile(value):
+        client.disconnect()
+        return clean_username(value)
+
+    monkeypatch.setattr(game, "clean_username", disconnect_meanwhile)
+    client.emit("join", {"room_id": "abc12", "username": "alice"})
+    assert game.ROOM_LIST == {} and game.PLAYER_ROOMS == {}
+
+
+def test_rooms_have_a_player_limit(monkeypatch):
+    # every progress message goes to every player of the room
+    monkeypatch.setattr(game, "MAX_PLAYERS_PER_ROOM", 2)
+    connect("alice")
+    tab("bob", "tab-12345678")
+    carol = game.socketio.test_client(game.app)
+    assert carol.emit("join", {"room_id": "abc12", "username": "carol"}, callback=True) == {
+        "ok": False, "error": "room is full"}
+    # a reconnecting tab takes its old place
+    tab("bob", "tab-12345678")
+    assert names() == ["alice", "bob"]
+    assert carol.emit("join", {"room_id": "other", "username": "carol"}, callback=True) == {"ok": True}
 
 
 @pytest.mark.parametrize("player_id", ["short", "x" * 65, "has spaces in it", ["tab-12345678"], 12345678])
@@ -708,10 +780,11 @@ def test_start_wakes_the_clock(monkeypatch):
 
 
 def test_an_error_in_one_room_does_not_hold_back_the_others(monkeypatch):
-    alice = connect("alice", room="room1")
+    # the broken room comes first, every room after it stayed in its countdown
     bob = connect("bob", room="room2")
-    alice.emit("game_start")
+    alice = connect("alice", room="room1")
     bob.emit("game_start")
+    alice.emit("game_start")
     real_start_race = game.start_race
 
     def start_race(room, now, outbox):
@@ -720,9 +793,37 @@ def test_an_error_in_one_room_does_not_hold_back_the_others(monkeypatch):
         real_start_race(room, now, outbox)
 
     monkeypatch.setattr(game, "start_race", start_race)
-    with pytest.raises(ValueError):
-        game.tick()
+    game.tick()
     assert texts(alice) == [game.TEXTS["en"]]
+    # back to waiting, its passed deadline would wake the clock again and again
+    assert events(bob, "room_update")[-1]["status"] == "waiting"
+    assert game.next_deadline() == game.ROOM_LIST["room1"]["started_at"] + game.RACE_SECONDS
+
+
+def test_a_socket_failing_to_send_does_not_stop_the_others(monkeypatch):
+    # a socket that finishes closing on another thread raises in the middle
+    # of a send, everyone after it lost the text and the rest of the messages
+    alice = connect("alice")
+    bob = connect("bob")
+    carol = connect("carol")
+    real_emit = game.socketio.emit
+    closing = sid(alice)
+
+    def emit(event, *args, to=None, **kwargs):
+        # like socket.io: one recipient after another, raising at the closing one
+        for recipient in to if isinstance(to, list) else [to]:
+            if recipient == closing:
+                raise SocketIsClosedError()
+            real_emit(event, *args, to=recipient, **kwargs)
+
+    monkeypatch.setattr(game.socketio, "emit", emit)
+    bob.get_received()
+    carol.get_received()
+    start(bob)
+    for client in (bob, carol):
+        received = client.get_received()
+        assert [msg["args"][0] for msg in received if msg["name"] == "load_text"] == [game.TEXTS["en"]]
+        assert received[-1]["name"] == "room_update" and received[-1]["args"][0]["status"] == "playing"
 
 
 def test_events_of_a_client_are_handled_in_order():
@@ -893,14 +994,16 @@ def test_actions_are_limited(clock):
     assert alice.emit("set_language", {"language": "fr"}, callback=True) == {"ok": True}
 
 
-def test_leave_is_never_rate_limited(clock):
-    # a dropped leave would keep a ghost player in the room
+def test_leave_is_rate_limited(clock):
+    # it takes the lock, a flood of them slowed every room
     connect("alice", room="room1")
     bob = connect("bob", room="room1")
     for _ in range(game.ACTION_LIMIT.burst):
         bob.emit("set_language", {"language": "de"})
-    assert bob.emit("set_language", {"language": "es"}, callback=True)["ok"] is False
-    bob.emit("leave")
+    assert bob.emit("leave", callback=True) == {"ok": False, "error": "too many requests"}
+    assert names("room1") == ["alice", "bob"]
+    # the client follows a leave with a join or a disconnect, both leave too
+    bob.disconnect()
     assert names("room1") == ["alice"]
 
 
@@ -942,9 +1045,11 @@ class HeldSockets:
             self.released.wait(5)
         return [b"ok"]
 
-    def request(self, ip, path="/socket.io/?EIO=4&transport=websocket", header_ip=None):
+    def request(self, ip, path="/socket.io/?EIO=4&transport=websocket", header_ip=None, origin=None):
         """Returns the HTTP status of a request that isn't held."""
         headers = {"CF-Connecting-IP": header_ip} if header_ip else {}
+        if origin:
+            headers["Origin"] = origin
         environ = EnvironBuilder(path=path, headers=headers,
                                  environ_base={"REMOTE_ADDR": ip}).get_environ()
         statuses = []
@@ -1006,6 +1111,16 @@ def test_new_connections_are_rate_limited(monkeypatch, clock, sockets):
     assert sockets.request("203.0.113.1") == 429
     assert sockets.request("203.0.113.2") == 200
     clock.advance(2)
+    assert sockets.request("203.0.113.1") == 200
+
+
+def test_pages_on_other_sites_are_refused_before_they_count(monkeypatch, clock, sockets):
+    # a page on another site, opened behind a school's shared address, used
+    # up the connection allowance of the players there
+    monkeypatch.setattr(game, "CONNECT_LIMIT", game.RateLimiter(rate=0.5, burst=2))
+    for _ in range(5):
+        assert sockets.request("203.0.113.1", origin="https://elsewhere.example") == 403
+    assert sockets.request("203.0.113.1", origin=game.CORS_ORIGINS[0]) == 200
     assert sockets.request("203.0.113.1") == 200
 
 
