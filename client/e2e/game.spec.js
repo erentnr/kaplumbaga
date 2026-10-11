@@ -276,6 +276,8 @@ test('a tab that reconnects keeps its name', async ({ joinAs }) => {
 test('a copy of a tab is another player', async ({ joinAs }) => {
   const room = newRoom()
   const alice = await joinAs('alice', room)
+  // joined, so a tab id kept in sessionStorage would be there to copy
+  await expect(turtles(alice.page)).toHaveText(['alice'])
   // window.open copies sessionStorage, like duplicating a tab
   const [copy] = await Promise.all([
     alice.page.waitForEvent('popup'),
