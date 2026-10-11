@@ -1,11 +1,241 @@
+:root {
+  --ground: #F4F2EA;
+  --ink: #1E2B1A;
+  --ink-soft: #3B4537;
+  --muted: #55604F;
+  --button: #3E7B27;
+  --button-hover: #2F6219;
+  --shell: #F2C94C;
+  --track: #5D8AA6;
+  --current: #E2E0D6;
+  --correct: #025B0E;
+  --typo: #8C311C;
+  --focus: #1F5FBF;
+  --line: #9DA394;
+  --off: #ECEADF;
+  --off-ink: #4E564A;
+  --placeholder: #6B7366;
+}
+
 html {
   height: 100%;
 }
 
 body {
   margin: 0;
-  font-family: 'Nunito Variable', sans-serif;
+  min-height: 100%;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: 'Nunito Variable', ui-rounded, 'Segoe UI', system-ui, sans-serif;
+}
+
+a {
+  color: var(--ink);
+}
+
+a:hover {
+  color: var(--button-hover);
+}
+
+.btn {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 0 24px;
+  border: 2px solid var(--ink);
+  border-radius: 14px;
+  background: var(--button);
+  box-shadow: 0 4px 0 var(--ink);
+  color: #fff;
+  font: inherit;
+  font-size: 18px;
+  font-weight: 800;
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform .08s, box-shadow .08s, background-color .15s;
+}
+
+.btn:hover {
+  background: var(--button-hover);
+  color: #fff;
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 var(--ink);
+}
+
+.btn-2 {
+  background: #fff;
+  color: var(--ink);
+}
+
+.btn-2:hover {
+  background: var(--off);
+  color: var(--ink);
+}
+
+.btn:disabled {
+  border-color: var(--line);
+  background: #D9DBD0;
+  box-shadow: 0 4px 0 var(--line);
+  color: var(--off-ink);
+  cursor: not-allowed;
+}
+
+.field {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 52px;
+  padding: 0 16px;
+  border: 2px solid var(--ink);
+  border-radius: 14px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.field::placeholder {
+  color: var(--placeholder);
+  font-weight: 600;
+}
+
+.field:disabled {
+  border-color: var(--line);
+  background: var(--off);
+  color: var(--off-ink);
+  cursor: not-allowed;
+}
+
+.field:disabled::placeholder {
+  color: var(--off-ink);
+}
+
+.field-bad {
+  border-color: var(--typo);
+  background: #FFF4F0;
+  box-shadow: inset 0 0 0 1px var(--typo);
+}
+
+.link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 6px;
+  border: 0;
+  background: none;
+  color: var(--button-hover);
+  font: inherit;
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.link:hover {
+  color: var(--ink);
+}
+
+.btn:focus-visible,
+.field:focus-visible,
+.link:focus-visible,
+a:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.card {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
   width: 100%;
-  height: 100%;
-  background-color: #f6f6f6;
+  padding: 28px;
+  border: 2px solid var(--ink);
+  border-radius: 22px;
+  background: #fff;
+  box-shadow: 0 6px 0 var(--ink);
+}
+
+/* every message of a page goes in one status line */
+.status {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  margin: 0;
+  padding: 10px 20px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.status > svg {
+  flex: none;
+}
+
+.status-win {
+  background: #FFF6D6;
+}
+
+.status-watch {
+  background: #E8F0F5;
+}
+
+.status-error {
+  border-color: var(--typo);
+  background: #FBE9E4;
+  color: #6E2512;
+}
+
+.status-warn {
+  border-color: #A05A00;
+  border-radius: 18px;
+  background: #FFF1DC;
+  color: #5C3400;
+}
+
+.dot {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border: 2px solid var(--ink);
+  border-radius: 50%;
+}
+
+.spin {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  box-sizing: border-box;
+  border: 3px solid #C9D7E0;
+  border-top-color: var(--ink);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+
+.status-warn .spin {
+  border-color: #F2D3A6;
+  border-top-color: #5C3400;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+    border-color: var(--ink);
+    border-style: dotted;
+  }
 }

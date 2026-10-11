@@ -1,9 +1,6 @@
 import { io } from "socket.io-client";
 import { Routes, Route, Navigate } from "react-router";
 
-import './App.css';
-import './Modal.css';
-
 import { Home, Game } from "./components"
 
 // Connects to the page's own origin when VITE_SOCKET_SERVER is not set. The
