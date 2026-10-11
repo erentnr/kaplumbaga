@@ -492,11 +492,12 @@ test('on a small phone with the keyboard open, the text stays in sight', async (
   await racer.page.evaluate(() => window.openKeyboard(300, 260))
 
   const box = (locator) => locator.boundingBox()
-  const within = async (inner, outer) => {
+  // boxes scroll after a resize, give them a moment
+  const within = (inner, outer) => expect(async () => {
     const [a, b] = [await box(inner), await box(outer)]
     expect(a.y).toBeGreaterThanOrEqual(b.y - 1)
     expect(bottomOf(a)).toBeLessThanOrEqual(bottomOf(b) + 1)
-  }
+  }).toPass({ timeout: 2000 })
   // the room covers exactly what the keyboard leaves visible
   const visible = await box(racer.page.locator('.room'))
   expect(visible.y).toBeCloseTo(260, 0)

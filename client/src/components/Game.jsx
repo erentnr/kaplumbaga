@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef } from "react";
+import { Fragment, useState, useEffect, useLayoutEffect, useRef } from "react";
 import { Link, useParams } from "react-router";
 
 import '../Game.css';
@@ -345,11 +345,14 @@ const Race = ({socket, roomID, connected, connectionFailed, onFatalError}) => {
   }, [racing]);
 
   // where the text box scrolls (phones), keep the word being typed in it, a
-  // third of the way down, also when the keyboard opens and the box shrinks
-  useEffect(() => {
+  // third of the way down, also when the keyboard opens and the box shrinks.
+  // Before the word is drawn, so it never shows hidden for a frame.
+  useLayoutEffect(() => {
     const box = textRef.current
     if (!racing || !box) return
-    const observer = new ResizeObserver(() => scrollIntoBox(box, currentWordRef.current, 1 / 3))
+    const keepInView = () => scrollIntoBox(box, currentWordRef.current, 1 / 3)
+    keepInView()
+    const observer = new ResizeObserver(keepInView)
     observer.observe(box)
     return () => observer.disconnect()
   }, [racing, current]);
