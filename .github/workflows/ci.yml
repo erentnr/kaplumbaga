@@ -1,7 +1,8 @@
 name: CI/CD
 
-# Pull requests run the tests. Pushes to main run the tests, then deploy the
-# server to the VPS and the client to Cloudflare.
+# Pull requests run the tests and build the server image. Pushes to main also
+# push that image to ghcr.io, then deploy it to the VPS and the client to
+# Cloudflare.
 #
 # Actions are pinned to commit SHAs (Dependabot keeps them updated), npm never
 # runs install scripts, and each deploy job only gets the one secret it needs
@@ -38,8 +39,37 @@ jobs:
           cache-dependency-path: server/requirements*.txt
       - run: pip install -r requirements-dev.txt
       - run: pytest -q
-      - name: Build the production image
-        run: docker build --tag kaplumbaga-server .
+
+  # Builds the server image the VPS runs, the only build of it. Runs no
+  # third-party code outside containers, so nothing else can use the token
+  # that pushes images.
+  image:
+    name: Server image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/erentnr/kaplumbaga-server:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker build --tag "$IMAGE" server
+      - name: Check the image starts and answers
+        run: |
+          docker run --detach --name smoke --publish 127.0.0.1:8000:8000 "$IMAGE"
+          curl --fail --silent --show-error --retry 10 --retry-delay 1 --retry-all-errors http://127.0.0.1:8000/healthz
+          docker rm --force smoke
+      - name: Push to ghcr.io
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE"
+          docker logout ghcr.io
 
   client:
     name: Client lint and build
@@ -101,7 +131,7 @@ jobs:
   # Runs no third-party code, so nothing else can read the SSH key.
   deploy-server:
     name: Deploy server
-    needs: [e2e]
+    needs: [e2e, image]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -117,7 +147,7 @@ jobs:
           printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
           printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          # the key can only run deploy/vps-deploy.sh, which deploys this commit
+          # the key can only run deploy/vps-deploy.sh, which runs this commit's image
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@$VPS_HOST" "$GITHUB_SHA"
           rm -f ~/.ssh/deploy_key
       - name: Check the server

@@ -47,6 +47,7 @@ Tests: `pytest` in `server`, `npx playwright test` in `client` (uses Google Chro
 
 ## Deployment
 
-GitHub Actions tests every pull request. Pushes to `main` deploy the server to
-a VPS ([`docker-compose.yml`](docker-compose.yml), [`deploy/vps-deploy.sh`](deploy/vps-deploy.sh))
-and the client to Cloudflare as static assets.
+GitHub Actions tests every pull request. Pushes to `main` build the server
+image once, push it to ghcr.io, and run it on a VPS
+([`docker-compose.yml`](docker-compose.yml), [`deploy/vps-deploy.sh`](deploy/vps-deploy.sh)).
+The client goes to Cloudflare as static assets.
