@@ -1,134 +1,726 @@
-.game-container {
-  width:100%;
-  max-width: 800px;
-}
-
-.kaplumbaga-race {
-  position: relative;
-  background-color: #5D8AA6;
-  /* grows when the players need more room */
-  min-height: 350px;
-  padding: 10px 0;
+.room {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  justify-content: space-around;
-  align-items: flex-start;
-  border-radius: 5px;
-  margin-bottom: 10px;
+  gap: 20px;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 24px 24px 48px;
 }
 
-/* one lane per player, the name and the turtle move inside it */
-.kaplumbaga-wrapper {
-  width: 100%;
-}
-
-.kaplumbaga-wrapper p,
-.kaplumbaga-wrapper .kaplumbaga {
-  position: relative;
-  display: block;
-  transition: left 0.5s, transform 0.5s;
-}
-
-.kaplumbaga-wrapper p {
+.room-header {
   display: flex;
-  margin: 0 0 4px;
-  width: fit-content;
-  max-width: 50%;
-  white-space: pre;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-/* a long name is shortened, the "(you)" marker after it stays whole */
-.kaplumbaga-wrapper .name {
-  overflow: hidden;
-  text-overflow: ellipsis;
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  color: var(--ink);
+  font-size: 26px;
+  font-weight: 900;
+  text-decoration: none;
 }
 
-.kaplumbaga-wrapper.me .name {
+.logo svg {
+  width: 52px;
+  height: 33px;
+}
+
+.room-code {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.room-code strong {
+  margin-left: 6px;
+  padding: 2px 10px;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 20px;
+  letter-spacing: 2px;
+}
+
+/* status line, then the language and Start */
+.room-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.room-bar .status {
+  flex: 1 1 360px;
+}
+
+.room-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.room-controls label {
+  font-size: 16px;
   font-weight: 800;
 }
 
-.kaplumbaga-wrapper.me p::after {
-  content: " (you)";
-  flex-shrink: 0;
+.room-controls:has(select:disabled) label {
+  color: var(--off-ink);
 }
 
-.kaplumbaga {
-  width: 60px;
-  height: auto;
+.select-wrap {
+  position: relative;
 }
 
-.game-text {
-  font-size: 1.7em;
-  line-height: 1.5em;
-  font-weight: 400;
-  padding:10px;
-  user-select: none;
+.select {
+  appearance: none;
+  padding-right: 44px;
+  font-size: 18px;
+  cursor: pointer;
 }
 
-.game-text span span {
-  border-radius: 5px;
-  padding: 0 5px;
+.select-wrap svg {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  margin-top: -10px;
+  color: var(--ink);
+  pointer-events: none;
 }
 
-.game-text .current {
-  background-color: #D7D7D9;
+.select:disabled + svg {
+  color: var(--off-ink);
 }
 
-.game-text .correct {
-  color: white;
-  background-color: #025b0e;
+.start-button {
+  padding: 0 28px;
 }
 
-.game-text .wrong {
-  color: white;
-  background-color: #8C311C;
+/* --- track: one lane per player, start line, run, finish line */
+
+.track {
+  --lane-h: 60px;
+  --name-w: 136px;
+  --finish-w: 20px;
+  --turtle-w: 60px;
+  --turtle-h: 38px;
+  --tag-size: 15px;
+  --checker: 10px;
+  position: relative;
+  overflow: hidden;
+  border: 2px solid var(--ink);
+  border-radius: 20px;
+  background: var(--track);
+  box-shadow: 0 6px 0 var(--ink);
 }
 
-.game-input {
+.track.is-crowded {
+  --lane-h: 36px;
+  --turtle-w: 44px;
+  --turtle-h: 28px;
+  --tag-size: 14px;
+}
+
+/* a full room scrolls instead of pushing the text away */
+.lanes {
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.lane {
+  display: grid;
+  grid-template-columns: var(--name-w) minmax(0, 1fr) var(--finish-w);
+  height: var(--lane-h);
+}
+
+.lane + .lane {
+  border-top: 2px dashed rgba(255, 255, 255, .55);
+}
+
+.lane-me {
+  background: rgba(242, 201, 76, .35);
+  box-shadow: inset 0 0 0 3px var(--shell);
+}
+
+.lane-win {
+  background: rgba(255, 255, 255, .22);
+}
+
+.lane-name {
   display: flex;
-  justify-content: center;
+  align-items: center;
+  min-width: 0;
+  padding: 0 10px;
+  border-right: 3px solid #fff;
 }
 
-.game-input input {
-  width: 98%;
-  padding: 12px 20px;
-  margin: 8px 0;
-  display: inline-block;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  box-sizing: border-box;
+.tag {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 1px 10px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  font-size: var(--tag-size);
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+
+.lane-me .tag {
+  background: var(--shell);
+}
+
+.lane-run {
+  position: relative;
+}
+
+.turtle {
+  position: absolute;
+  top: 50%;
+  left: calc((100% - var(--turtle-w)) * var(--progress));
+  width: var(--turtle-w);
+  height: var(--turtle-h);
+  margin-top: calc(var(--turtle-h) / -2);
+  transition: left .3s ease-out;
+}
+
+.turtle > svg:last-child {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: 50% 90%;
+}
+
+.track.is-racing .turtle > svg:last-child {
+  animation: waddle .45s ease-in-out infinite alternate;
+}
+
+@keyframes waddle {
+  from { transform: rotate(-3deg); }
+  to { transform: rotate(3deg) translateY(-2px); }
+}
+
+.crown {
+  position: absolute;
+  top: calc(var(--turtle-h) * -.32);
+  left: 52%;
+  width: calc(var(--turtle-w) * .4);
+  height: auto;
+  transform: rotate(14deg);
+}
+
+.finish {
+  background: repeating-conic-gradient(var(--ink) 0 25%, #fff 0 50%) 0 0 / var(--checker) var(--checker);
+}
+
+/* --- countdown, sized by the track it covers */
 
 .countdown {
   position: absolute;
   inset: 0;
+  container-type: size;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: white;
-  font-size: 6em;
-  font-weight: 900;
+  background: rgba(30, 43, 26, .45);
   pointer-events: none;
 }
 
-.game-controls {
+.countdown-inner {
   display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 10px;
-  margin: 20px;
 }
 
-.language-select {
-  padding: 5px;
-  font-size: 18px;
+.countdown-number {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: min(150px, 62cqh);
+  height: min(150px, 62cqh);
+  border: 3px solid var(--ink);
+  border-radius: 50%;
+  background: var(--shell);
+  box-shadow: 0 6px 0 var(--ink);
+  color: var(--ink);
+  font-size: min(104px, 43cqh);
+  font-weight: 900;
+  line-height: 1;
+  animation: pop 1s ease-out both;
 }
 
-.start-button {
-  padding:5px;
-  font-size: 20px;
+.countdown-number.is-go {
+  font-size: min(56px, 24cqh);
 }
 
-.game-message {
+@keyframes pop {
+  0% { transform: scale(1.35); opacity: 0; }
+  25% { transform: scale(1); opacity: 1; }
+  85% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(.9); opacity: 0; }
+}
+
+.countdown-steps {
+  display: flex;
+  gap: 8px;
   margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.countdown-steps li {
+  padding: 2px 10px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.countdown-steps .done {
+  background: var(--ink);
+  color: #fff;
+}
+
+.countdown-steps .now {
+  background: var(--shell);
+  font-weight: 900;
+}
+
+/* one or two lanes: only the number */
+@container (max-height: 119px) {
+  .countdown-steps {
+    display: none;
+  }
+}
+
+/* --- race text */
+
+.race-text {
+  position: relative;
+  box-sizing: border-box;
+  padding: 24px 22px;
+  border: 2px solid var(--ink);
+  border-radius: 20px;
+  background: #fff;
+}
+
+.race-text.is-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 150px;
+  padding: 28px;
+}
+
+.race-text-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 20px;
+  font-weight: 700;
+  text-align: center;
+  text-wrap: balance;
+}
+
+.words {
+  margin: 0;
+  color: #2A3426;
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.85;
+  user-select: none;
+}
+
+.w {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0 6px;
+  border-radius: 8px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.w-ok {
+  background: var(--correct);
+  color: #fff;
+}
+
+.w-cur {
+  background: var(--current);
+  box-shadow: inset 0 -4px 0 var(--ink);
+}
+
+/* differs from the current word in shape and lightness too, not only hue */
+.w-bad {
+  background: var(--typo);
+  color: #fff;
+  text-decoration: underline wavy #FFC9B8 2px;
+  text-underline-offset: 6px;
+}
+
+/* --- typing */
+
+.typing {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.typing-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.typing-head label {
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.typo-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--typo);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.typing-field {
+  width: 100%;
+  min-height: 60px;
+  font-size: 24px;
+}
+
+/* --- connection lost: the last known room, frozen */
+
+.room.is-frozen > :is(.track, .race-text, .typing) {
+  opacity: .5;
+}
+
+/* --- before the room's state arrives */
+
+.track-skeleton {
+  --lane-h: 60px;
+  border-color: var(--line);
+  background: #A9BFCD;
+  box-shadow: none;
+}
+
+.skel-lane {
+  display: flex;
+  align-items: center;
+  height: var(--lane-h);
+  padding: 0 10px;
+}
+
+.skel-lane + .skel-lane {
+  border-top: 2px dashed rgba(255, 255, 255, .55);
+}
+
+.skel-tag {
+  height: 20px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .7);
+}
+
+.race-text-skeleton {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  min-height: 150px;
+  border-color: #D9DBD0;
+}
+
+.skel {
+  height: 18px;
+  border-radius: 10px;
+  background: var(--current);
+}
+
+.skel-input {
+  box-sizing: border-box;
+  height: 60px;
+  margin-top: 30px;
+  border: 2px solid #D9DBD0;
+  border-radius: 14px;
+  background: var(--off);
+}
+
+/* --- a room that can't be joined */
+
+.room-error {
+  box-sizing: border-box;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 56px 20px;
+}
+
+.error-card {
+  align-items: center;
+  padding: 32px 24px;
+  text-align: center;
+}
+
+.error-help {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 17px;
+  font-weight: 600;
+  text-wrap: pretty;
+}
+
+/* --- phones */
+
+@media (max-width: 640px) {
+  .room {
+    gap: 12px;
+    padding: 14px 16px 24px;
+  }
+
+  .logo {
+    gap: 8px;
+    font-size: 20px;
+  }
+
+  .logo svg {
+    width: 40px;
+    height: 25px;
+  }
+
+  .room-code {
+    font-size: 14px;
+  }
+
+  .room-code strong {
+    margin-left: 4px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 16px;
+    letter-spacing: 1.5px;
+  }
+
+  /* the status first, the language and Start at the bottom, by the thumbs */
+  .room-bar {
+    display: contents;
+  }
+
+  .room-bar .status {
+    flex: none;
+    min-height: 48px;
+    padding: 8px 16px;
+  }
+
+  .room-controls {
+    order: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px 10px;
+    align-items: end;
+  }
+
+  .room-controls label {
+    font-size: 15px;
+  }
+
+  .select-wrap {
+    grid-row: 2;
+  }
+
+  .select {
+    width: 100%;
+  }
+
+  .start-button {
+    grid-row: 2;
+  }
+
+  .track {
+    --lane-h: 44px;
+    --name-w: 96px;
+    --finish-w: 14px;
+    --turtle-w: 44px;
+    --turtle-h: 28px;
+    --tag-size: 13px;
+    --checker: 7px;
+    border-radius: 16px;
+    box-shadow: 0 4px 0 var(--ink);
+  }
+
+  .track.is-crowded {
+    --lane-h: 32px;
+    --turtle-w: 36px;
+    --turtle-h: 23px;
+    --tag-size: 12px;
+  }
+
+  .lane-name {
+    padding: 0 6px;
+  }
+
+  .tag {
+    padding: 0 7px;
+  }
+
+  .race-text {
+    padding: 14px 12px;
+    border-radius: 16px;
+  }
+
+  .race-text.is-empty {
+    min-height: 120px;
+    padding: 20px 16px;
+  }
+
+  .race-text-note {
+    font-size: 18px;
+  }
+
+  .words {
+    font-size: 21px;
+    line-height: 1.75;
+  }
+
+  .w {
+    padding: 0 4px;
+    border-radius: 6px;
+    line-height: 1.4;
+  }
+
+  .w-cur {
+    box-shadow: inset 0 -3px 0 var(--ink);
+  }
+
+  .typing-head label {
+    font-size: 15px;
+  }
+
+  .typing-field {
+    min-height: 52px;
+    font-size: 20px;
+  }
+
+  /* Racing: the room fills the screen above the keyboard, the text scrolls
+     and the input stays at the bottom. Only the status and the room code
+     stay from the top, and the track gets compact. */
+  .room.is-typing {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    gap: 10px;
+    height: var(--viewport-height, 100dvh);
+    padding: 12px 14px;
+  }
+
+  .room.is-typing .room-header {
+    display: contents;
+  }
+
+  .room.is-typing :is(.logo, .room-controls, .status-more) {
+    display: none;
+  }
+
+  .room.is-typing .room-code {
+    grid-area: 1 / 2;
+    align-self: center;
+  }
+
+  .room.is-typing .room-code strong {
+    padding: 0;
+    border: 0;
+    background: none;
+  }
+
+  .room.is-typing .status {
+    grid-area: 1 / 1;
+    gap: 8px;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    font-size: 16px;
+  }
+
+  .room.is-typing .dot {
+    width: 10px;
+    height: 10px;
+  }
+
+  .room.is-typing .track {
+    --lane-h: 30px;
+    --name-w: 84px;
+    --finish-w: 12px;
+    --turtle-w: 36px;
+    --turtle-h: 23px;
+    --tag-size: 12px;
+    --checker: 6px;
+    grid-area: 2 / 1 / 3 / -1;
+    border-radius: 14px;
+    box-shadow: none;
+  }
+
+  /* about five lanes, the text needs the room */
+  .room.is-typing .lanes {
+    max-height: calc(var(--lane-h) * 5 + 8px);
+  }
+
+  .room.is-typing .lane-name {
+    border-right-width: 2px;
+  }
+
+  .room.is-typing .tag {
+    padding: 0 6px;
+    border-width: 1.5px;
+    line-height: 16px;
+  }
+
+  .room.is-typing .race-text {
+    grid-area: 3 / 1 / 4 / -1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 12px 10px;
+  }
+
+  .room.is-typing .typing {
+    grid-area: 4 / 1 / 5 / -1;
+  }
+
+  .room.is-typing .typing-head label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turtle {
+    transition: none;
+  }
+
+  .track.is-racing .turtle > svg:last-child,
+  .countdown-number {
+    animation: none;
+  }
 }

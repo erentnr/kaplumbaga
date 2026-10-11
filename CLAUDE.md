@@ -54,7 +54,8 @@ Progress is sent once per completed word, as a percentage (`progressAt`/`wordAt`
 ## Client architecture (`client/src`)
 
 - `App.jsx` creates a single socket with `autoConnect: false`. Only the game page (`/play/:room_id`) connects; the home page never does.
-- In `Game.jsx`, `Game` owns the connection. `Race` mounts only while connected, so it mounts again after every reconnect with clean state. It joins on mount and emits `leave` on unmount.
+- In `Game.jsx`, `Game` owns the connection. `Race` is keyed by a count of connections, so it mounts again after every reconnect with clean state. While the socket is down, the old `Race` stays on screen, frozen (controls disabled). It joins on mount and emits `leave` on unmount, only on the connection it joined with.
+- The look follows the Kaplumbaga design canvas: colors are CSS variables in `index.css` (shared buttons, fields and the status line live there too), the turtle and icons are inline SVG in `components/Art.jsx`, and phones get their own layout through `@media (max-width: 640px)` in `Game.css`. While racing on a phone, the room fills the visual viewport (`--viewport-height`, set from `window.visualViewport`) so the input stays above the keyboard.
 - `storage.js` wraps localStorage and falls back to memory when the browser blocks site data. Use it, not `localStorage` directly.
 - `getPlayerId()` is kept in module memory on purpose. sessionStorage would be copied into a duplicated tab, and the two tabs would then replace each other.
 

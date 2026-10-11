@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
 
-import TurtleSvg from '../assets/turtle.svg';
+import '../Home.css';
 
-import Modal from './Modal'
+import { Turtle } from './Art'
+import NameDialog from './NameDialog'
 import { getUsername, saveUsername } from '../username'
 import { randomRoomCode } from '../random'
 
@@ -16,7 +17,7 @@ const roomCodeFrom = (text) => {
 
 const Home = () => {
   const [roomID, setRoomID] = useState('');
-  const [showModal, setShowModal] = useState(false);
+  const [showNameDialog, setShowNameDialog] = useState(false);
   const [username, setUsername] = useState(getUsername);
 
   let navigate = useNavigate();
@@ -25,80 +26,71 @@ const Home = () => {
     navigate(`/play/${randomRoomCode()}`)
   }
 
-  const handleJoin = () => {
+  const handleJoin = (event) => {
+    event.preventDefault()
     const code = roomCodeFrom(roomID)
     if (!code) return
     navigate(`/play/${encodeURIComponent(code)}`)
   }
 
-  const handleChange = (event) => {
-    setRoomID(event.target.value)
-  }
-
-  const handleNewUsername = () => {
-    setShowModal(true)
-  }
-
   const handleSaveUsername = (newUsername) => {
     saveUsername(newUsername)
     setUsername(newUsername)
-    setShowModal(false)
-  }
-
-  const handleCloseModal = () => {
-    setShowModal(false)
+    setShowNameDialog(false)
   }
 
   return (
-    <div className="main">
-      <Modal showModal={showModal} onSave={handleSaveUsername} onClose={handleCloseModal} />
-      <div className="home-header">
-       <img className="kaplumbaga" alt="" src={TurtleSvg} />
-       <div className="header-title">
-         <h2>Kaplumbaga</h2>
-         <p>Test your speed, play with your friends!</p>
-       </div>
+    <main className="home">
+      {showNameDialog && (
+        <NameDialog
+          username={username}
+          onSave={handleSaveUsername}
+          onClose={() => setShowNameDialog(false)}
+        />
+      )}
+      <div className="home-hero">
+        <div className="hero-turtle">
+          <Turtle detailed width="200" height="127" />
+        </div>
+        <div className="hero-ground" aria-hidden="true" />
+      </div>
+      <div className="home-title">
+        <h1>Kaplumbaga</h1>
+        <p>Test your speed, play with your friends!</p>
       </div>
 
-      <div className="join-wrapper">
-        <input
-          className="room-code-input"
-          placeholder="Room Code..."
-          value={roomID}
-          onChange={handleChange}
-          onKeyDown={(event) => event.key === 'Enter' && handleJoin()}
-          autoCapitalize="none"
-          autoComplete="off"
-          autoCorrect="off"
-          spellCheck={false}
-        />
-        <input
-          className="kaplumbaga-button"
-          type="button"
-          value="Join Game"
-          onClick={handleJoin}
-          disabled={!roomCodeFrom(roomID)}
-        />
-        <div className="username-wrapper">
-         <p>Joining as {username}. 
-          <button
-            type="button"
-            className="change-username"
-            onClick={handleNewUsername}
-          >
+      <section className="card" aria-label="Join or create a game">
+        <form className="join-form" onSubmit={handleJoin}>
+          <label htmlFor="room-code">Room code</label>
+          <div className="join-row">
+            <input
+              id="room-code"
+              className="field room-code-input"
+              placeholder="e.g. k7m2p"
+              value={roomID}
+              onChange={(event) => setRoomID(event.target.value)}
+              autoCapitalize="none"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            <button className="btn" type="submit" disabled={!roomCodeFrom(roomID)}>
+              Join Game
+            </button>
+          </div>
+        </form>
+        <p className="joining-as">
+          Joining as <strong>{username}</strong>.{' '}
+          <button type="button" className="link" onClick={() => setShowNameDialog(true)}>
             Change
           </button>
         </p>
-        </div>
-        <h2>or</h2>
-        <input
-          className="kaplumbaga-button"
-          type="button"
-          value="Create Game"
-          onClick={handleCreate}
-        />
-      </div>
-    </div>
+        <div className="divider" aria-hidden="true">or</div>
+        <button className="btn btn-2" type="button" onClick={handleCreate}>
+          Create Game
+        </button>
+      </section>
+    </main>
   )
 };
 

@@ -1,0 +1,234 @@
+.home {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 28px;
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 56px 20px 64px;
+}
+
+.home-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.hero-turtle {
+  width: 200px;
+  animation: stroll 2.4s ease-in-out infinite alternate;
+}
+
+.hero-turtle svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+@keyframes stroll {
+  from { transform: translateX(-10px); }
+  to { transform: translateX(10px); }
+}
+
+/* the ground the turtle walks on */
+.hero-ground {
+  width: 280px;
+  margin-top: 2px;
+  border-top: 3px dashed var(--line);
+}
+
+.home-title {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+}
+
+.home-title h1 {
+  margin: 0;
+  font-size: 64px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: -1.5px;
+}
+
+.home-title p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 20px;
+  font-weight: 600;
+  text-wrap: balance;
+}
+
+.join-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.join-form label {
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.join-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.room-code-input {
+  flex: 1 1 200px;
+  letter-spacing: 3px;
+  text-transform: lowercase;
+}
+
+.joining-as {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.joining-as strong {
+  margin-left: 4px;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.divider::before,
+.divider::after {
+  content: '';
+  flex: 1;
+  height: 2px;
+  background: #E2DFD3;
+}
+
+.name-dialog {
+  box-sizing: border-box;
+  width: calc(100% - 40px);
+  max-width: 440px;
+  margin: min(160px, 12vh) auto auto;
+  padding: 0;
+  overflow: visible;
+  border: 2px solid var(--ink);
+  border-radius: 22px;
+  background: #fff;
+  box-shadow: 0 8px 0 var(--ink);
+  color: var(--ink);
+}
+
+.name-dialog::backdrop {
+  background: rgba(30, 43, 26, .55);
+}
+
+.name-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 28px;
+}
+
+.name-form h2 {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 900;
+}
+
+.name-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.name-field-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.name-field-head label {
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.name-count {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.name-input {
+  width: 100%;
+}
+
+.name-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+@media (max-width: 480px) {
+  .home {
+    gap: 22px;
+    padding: 48px 20px 32px;
+  }
+
+  .hero-turtle {
+    width: 150px;
+  }
+
+  .home-title h1 {
+    font-size: 44px;
+    letter-spacing: -1px;
+  }
+
+  .home-title p {
+    font-size: 18px;
+  }
+
+  .card {
+    gap: 14px;
+    padding: 20px;
+  }
+
+  .join-form {
+    gap: 14px;
+  }
+
+  .join-row {
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .join-row > * {
+    flex: none;
+    width: 100%;
+  }
+
+  .name-form {
+    padding: 22px 20px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-turtle {
+    animation: none;
+  }
+}

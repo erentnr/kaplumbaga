@@ -2,6 +2,8 @@ import { test as base, expect } from '@playwright/test'
 
 const newRoom = () => `e2e${Math.random().toString(36).slice(2, 8)}`
 
+const PHONE = { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true }
+
 // a player in their own browser context, like a separate device
 async function openPlayer(context, name, room, { viaHome = false, language, beforeGoto } = {}) {
   await context.addInitScript(([username, lang]) => {
@@ -26,8 +28,8 @@ async function openPlayer(context, name, room, { viaHome = false, language, befo
   if (viaHome) {
     // enter through the home page so back/forward are in-app navigations
     await page.goto('/')
-    await page.fill('.room-code-input', room)
-    await page.click('input[value="Join Game"]')
+    await roomCodeInput(page).fill(room)
+    await page.getByRole('button', { name: 'Join Game' }).click()
     await page.waitForURL(`**/play/${room}`)
   } else {
     await page.goto(`/play/${room}`)
@@ -43,7 +45,7 @@ const test = base.extend({
     const contexts = []
     await provide(async (name, room, options) => {
       // registered before anything can fail, so it is always closed
-      const context = await browser.newContext()
+      const context = await browser.newContext(options?.phone ? PHONE : {})
       contexts.push(context)
       return openPlayer(context, name, room, options)
     })
@@ -51,22 +53,25 @@ const test = base.extend({
   },
 })
 
-const turtles = (page) => page.locator('.kaplumbaga-wrapper p')
-const words = (page) => page.locator('.game-text > span > span')
-const message = (page) => page.locator('.game-message')
-const input = (page) => page.locator('.game-input input')
-const startButton = (page) => page.locator('.start-button')
-const languageSelect = (page) => page.locator('.language-select')
+const roomCodeInput = (page) => page.getByLabel('Room code')
+// player names, one lane each
+const turtles = (page) => page.locator('.lane .tag')
+const words = (page) => page.locator('.words .w')
+const message = (page) => page.locator('.status')
+const input = (page) => page.getByLabel('Your typing')
+const startButton = (page) => page.getByRole('button', { name: 'Start', exact: true })
+const languageSelect = (page) => page.getByLabel('Language')
 // distance of a turtle from the start line, and the room left to the finish line
-const turtleOffsets = (page, name) => page.locator('.kaplumbaga-wrapper', { hasText: name })
+const turtleOffsets = (page, name) => page.locator('.lane', { hasText: name })
   .evaluate((lane) => {
-    const track = lane.closest('.kaplumbaga-race').getBoundingClientRect()
-    const turtle = lane.querySelector('.kaplumbaga').getBoundingClientRect()
-    const label = lane.querySelector('p').getBoundingClientRect()
+    const run = lane.querySelector('.lane-run').getBoundingClientRect()
+    const turtle = lane.querySelector('.turtle').getBoundingClientRect()
+    const name = lane.querySelector('.lane-name').getBoundingClientRect()
+    const tag = lane.querySelector('.tag').getBoundingClientRect()
     return {
-      fromStart: Math.round(turtle.left - track.left),
-      toFinish: Math.round(track.right - turtle.right),
-      labelToFinish: Math.round(track.right - label.right),
+      fromStart: Math.round(turtle.left - run.left),
+      toFinish: Math.round(run.right - turtle.right),
+      tagOverflow: Math.round(tag.right - name.right),
     }
   })
 const turtleLeft = async (page, name) => (await turtleOffsets(page, name)).fromStart
@@ -86,7 +91,7 @@ test('players race with a countdown, rematch, late joiners and leaving', async (
 
   await expect(turtles(alice.page)).toHaveText(['alice', 'bob'])
   // your own turtle is marked
-  await expect(alice.page.locator('.kaplumbaga-wrapper.me')).toHaveText('alice')
+  await expect(alice.page.locator('.lane-me .tag')).toHaveText('alice')
   await expect(message(alice.page)).toContainText(`Room code: ${room}`)
 
   // --- race 1: countdown, then the text
@@ -106,13 +111,15 @@ test('players race with a countdown, rematch, late joiners and leaving', async (
 
   const firstWord = await words(bob.page).first().textContent()
   await input(bob.page).pressSequentially(`${firstWord} `)
-  await expect(words(bob.page).first()).toHaveClass('correct')
+  await expect(words(bob.page).first()).toContainClass('w-ok')
   await expect.poll(() => turtleLeft(alice.page, 'bob')).toBeGreaterThan(0)
 
   await input(bob.page).pressSequentially('#')
-  await expect(words(bob.page).nth(1)).toHaveClass('wrong')
+  await expect(words(bob.page).nth(1)).toContainClass('w-bad')
+  await expect(bob.page.getByText('Typo. Fix it to keep going.')).toBeVisible()
   await input(bob.page).press('Backspace')
-  await expect(words(bob.page).nth(1)).toHaveClass('current')
+  await expect(words(bob.page).nth(1)).toContainClass('w-cur')
+  await expect(bob.page.getByText('Typo. Fix it to keep going.')).toBeHidden()
 
   await typeWholeText(alice.page)
   await expect(message(bob.page)).toHaveText('alice won!')
@@ -136,7 +143,7 @@ test('players race with a countdown, rematch, late joiners and leaving', async (
 
   // --- in-app navigation unmounts the game: bob leaves and comes back
   await bob.page.goBack()
-  await expect(bob.page.locator('.room-code-input')).toBeVisible()
+  await expect(roomCodeInput(bob.page)).toBeVisible()
   await expect(turtles(alice.page)).toHaveText(['alice', 'carol'])
   await bob.page.goForward()
   await expect(turtles(alice.page)).toHaveText(['alice', 'carol', 'bob'])
@@ -178,9 +185,9 @@ test('language picker changes the text for everyone in the room', async ({ joinA
 
   await languageSelect(bob.page).selectOption('de')
   await expect(languageSelect(alice.page)).toHaveValue('de')
-  await expect(alice.page.locator('.game-text')).toHaveAttribute('lang', 'de')
 
   await startButton(alice.page).click()
+  await expect(alice.page.locator('.words')).toHaveAttribute('lang', 'de')
   await expect(words(alice.page).first()).toHaveText('Die')
   await expect(words(bob.page).first()).toHaveText('Die')
 
@@ -199,15 +206,19 @@ test('language picker changes the text for everyone in the room', async ({ joinA
 test('every language can be raced', async ({ joinAs }) => {
   const room = newRoom()
   const alice = await joinAs('alice', room)
+  // the controls show up with the room
+  await expect(turtles(alice.page)).toHaveText(['alice'])
   const options = await languageSelect(alice.page).locator('option').evaluateAll(
     (els) => els.map((el) => el.value))
   expect(options).toEqual(['tr', 'en', 'pt', 'de', 'fr', 'es'])
 
   for (const language of options) {
     await languageSelect(alice.page).selectOption(language)
-    await expect(alice.page.locator('.game-text')).toHaveAttribute('lang', language)
+    // the select shows the room's language, it changes once the server took it
+    await expect(languageSelect(alice.page)).toHaveValue(language)
     await startButton(alice.page).click()
     await expect(input(alice.page)).toBeFocused()
+    await expect(alice.page.locator('.words')).toHaveAttribute('lang', language)
     // phone keyboards can type a curly apostrophe for the straight one in "l'heure"
     await typeWholeText(alice.page, { typed: (word) => word.replaceAll("'", '\u2019') })
     await expect(message(alice.page)).toHaveText('You won!')
@@ -223,7 +234,9 @@ test('a long name keeps the turtle inside the track', async ({ joinAs }) => {
   await typeWholeText(racer.page)
   await expect(message(racer.page)).toHaveText('You won!')
   await expect.poll(async () => (await turtleOffsets(racer.page, longName)).toFinish).toBe(0)
-  expect((await turtleOffsets(racer.page, longName)).labelToFinish).toBeGreaterThanOrEqual(0)
+  // the name is cut short in its column, the turtle says it in full
+  expect((await turtleOffsets(racer.page, longName)).tagOverflow).toBeLessThanOrEqual(0)
+  await expect(racer.page.getByRole('img', { name: `${longName} (you), winner` })).toBeVisible()
 })
 
 test('a classroom fits on the track', async ({ joinAs }) => {
@@ -237,13 +250,13 @@ test('a classroom fits on the track', async ({ joinAs }) => {
   await expect(turtles(teacher.page)).toHaveCount(12)
   const layout = await teacher.page.evaluate(() => {
     const box = (element) => element.getBoundingClientRect()
-    const track = box(document.querySelector('.kaplumbaga-race'))
-    const lanes = [...document.querySelectorAll('.kaplumbaga-wrapper')].map(box)
+    const track = box(document.querySelector('.track'))
+    const lanes = [...document.querySelectorAll('.lane')].map(box)
     return {
       top: track.top, bottom: track.bottom,
       lanesTop: Math.min(...lanes.map((lane) => lane.top)),
       lanesBottom: Math.max(...lanes.map((lane) => lane.bottom)),
-      textTop: box(document.querySelector('.game-text')).top,
+      textTop: box(document.querySelector('.race-text')).top,
     }
   })
   expect(layout.lanesTop).toBeGreaterThanOrEqual(layout.top)
@@ -261,8 +274,8 @@ test('room codes ignore case and a pasted invite link works', async ({ joinAs, b
 
   const carol = await joinAs('carol', newRoom())
   await carol.page.goto('/')
-  await carol.page.fill('.room-code-input', ` ${baseURL}/play/${room} `)
-  await carol.page.press('.room-code-input', 'Enter')
+  await roomCodeInput(carol.page).fill(` ${baseURL}/play/${room} `)
+  await roomCodeInput(carol.page).press('Enter')
   await carol.page.waitForURL(`**/play/${room}`)
   await expect(turtles(alice.page)).toHaveText(['alice', 'bob', 'carol'])
 })
@@ -294,13 +307,13 @@ test('a racer who reconnects types on from where they were', async ({ joinAs }) 
   await expect(input(bob.page)).toBeEnabled()
   const [first, second] = await words(bob.page).allTextContents()
   await input(bob.page).pressSequentially(`${first} ${second} `)
-  await expect(words(bob.page).nth(1)).toHaveClass('correct')
+  await expect(words(bob.page).nth(1)).toContainClass('w-ok')
   // the server keeps the old connection until its ping timeout
   await connections[0].close()
   await expect.poll(() => connections.length).toBe(2)
   await expect(input(bob.page)).toBeEnabled()
-  await expect(words(bob.page).nth(1)).toHaveClass('correct')
-  await expect(words(bob.page).nth(2)).toHaveClass('current')
+  await expect(words(bob.page).nth(1)).toContainClass('w-ok')
+  await expect(words(bob.page).nth(2)).toContainClass('w-cur')
   await typeWholeText(bob.page, { from: 2 })
   await expect(message(bob.page)).toHaveText('You won!')
   await expect(message(alice.page)).toHaveText('bob won!')
@@ -334,12 +347,12 @@ test('works when the browser blocks site data', async ({ browser }) => {
   const errors = []
   page.on('pageerror', (error) => errors.push(error.message))
   await page.goto('/')
-  await page.click('.change-username')
-  await page.fill('.username-input', 'dana')
-  await page.click('.username-save-button')
+  await page.getByRole('button', { name: 'Change' }).click()
+  await page.getByLabel('Display name').fill('dana')
+  await page.getByRole('button', { name: 'Save name' }).click()
   await expect(page.getByText(/^Joining as dana\./)).toBeVisible()
   // kept for the rest of the visit
-  await page.click('input[value="Create Game"]')
+  await page.getByRole('button', { name: 'Create Game' }).click()
   await expect(turtles(page)).toHaveText(['dana'])
   expect(errors).toEqual([])
   await context.close()
@@ -347,29 +360,98 @@ test('works when the browser blocks site data', async ({ browser }) => {
 
 test('the username dialog can be closed without saving', async ({ page }) => {
   await page.goto('/')
-  const dialog = page.locator('.modal-main')
+  const dialog = page.getByRole('dialog', { name: 'What should we call you?' })
+  const nameInput = page.getByLabel('Display name')
   const change = page.getByRole('button', { name: 'Change' })
   const joiningAs = page.getByText(/^Joining as /)
   const before = await joiningAs.textContent()
   for (const close of [
-    () => page.click('input[value="Cancel"]'),
+    () => page.getByRole('button', { name: 'Cancel' }).click(),
     () => page.keyboard.press('Escape'),
     () => page.mouse.click(5, 5),  // outside the dialog
   ]) {
     await change.click()
-    await expect(page.locator('.username-input')).toBeFocused()
+    await expect(nameInput).toBeFocused()
+    await nameInput.press('End')
+    await nameInput.pressSequentially('x')
     await close()
     await expect(dialog).toBeHidden()
   }
   await expect(joiningAs).toHaveText(before)
-  // opened from the keyboard too, Enter saves
+  // opened from the keyboard too, with the name to edit, Enter saves
   await change.focus()
   await page.keyboard.press('Enter')
-  await expect(page.locator('.username-input')).toBeFocused()
+  await expect(nameInput).toBeFocused()
+  await expect(nameInput).toHaveValue(before.match(/^Joining as (.+)\./)[1])
+  await expect(dialog.getByText('/ 24')).toBeVisible()
+  // the old name is selected, typing replaces it
   await page.keyboard.type('erin')
   await page.keyboard.press('Enter')
   await expect(dialog).toBeHidden()
   await expect(joiningAs).toHaveText(/^Joining as erin\./)
+})
+
+test('the room stays on screen, frozen, while the connection is down', async ({ joinAs }) => {
+  const room = newRoom()
+  const alice = await joinAs('alice', room)
+  let hold = false
+  const connections = []
+  const held = []
+  const bob = await joinAs('bob', room, {
+    beforeGoto: (page) => page.routeWebSocket(/socket\.io/, (ws) => {
+      // a held connection waits for the server, like a slow network
+      if (hold) return held.push(ws)
+      ws.onClose(() => {})
+      const server = ws.connectToServer()
+      server.onClose(() => {})
+      connections.push([ws, server])
+    }),
+  })
+  await expect(turtles(bob.page)).toHaveText(['alice', 'bob'])
+  hold = true
+  // both ends, so the server doesn't keep the socket until its ping timeout;
+  // the last one, the server may have turned down earlier ones at its limit
+  const [browserSide, serverSide] = connections.at(-1)
+  await Promise.all([browserSide.close(), serverSide.close()])
+  await expect.poll(() => held.length).toBeGreaterThan(0)
+  await expect(message(bob.page)).toHaveText('Connecting...')
+  // the last known room, nothing in it can be changed
+  await expect(bob.page.locator('.room.is-frozen')).toBeVisible()
+  await expect(turtles(bob.page)).toHaveText(['alice', 'bob'])
+  await expect(startButton(bob.page)).toBeDisabled()
+  await expect(languageSelect(bob.page)).toBeDisabled()
+  // it gets through, a new room view takes over
+  held[0].onClose(() => {})
+  held[0].connectToServer().onClose(() => {})
+  await expect(message(bob.page)).toContainText(`Room code: ${room}`)
+  await expect(bob.page.locator('.room.is-frozen')).toHaveCount(0)
+  await expect(startButton(bob.page)).toBeEnabled()
+  await expect(turtles(alice.page)).toHaveText(['alice', 'bob'])
+  expect(bob.errors).toEqual([])
+})
+
+test('on a phone the race fills the screen with the input at the bottom', async ({ joinAs }) => {
+  const racer = await joinAs('alice', newRoom(), { phone: true })
+  // between races the language and Start sit at the bottom, by the thumbs
+  await expect(turtles(racer.page)).toHaveText(['alice'])
+  const track = await racer.page.locator('.track').boundingBox()
+  expect((await startButton(racer.page).boundingBox()).y).toBeGreaterThan(track.y)
+  await startButton(racer.page).click()
+  await expect(input(racer.page)).toBeFocused()
+  const layout = await racer.page.evaluate(() => ({
+    height: window.innerHeight,
+    pageHeight: document.documentElement.scrollHeight,
+    inputBottom: document.getElementById('typing').getBoundingClientRect().bottom,
+  }))
+  expect(layout.pageHeight).toBeLessThanOrEqual(layout.height)
+  expect(layout.height - layout.inputBottom).toBeLessThan(40)
+  // the room code stays, the rest of the header and the controls make room
+  await expect(racer.page.getByRole('link', { name: 'Kaplumbaga' })).toBeHidden()
+  await expect(startButton(racer.page)).toBeHidden()
+  await typeWholeText(racer.page)
+  await expect(message(racer.page)).toHaveText('You won!')
+  await expect(startButton(racer.page)).toBeVisible()
+  expect(racer.errors).toEqual([])
 })
 
 test('a tab that reconnects keeps its name', async ({ joinAs }) => {
@@ -410,7 +492,7 @@ test('a copy of a tab is another player', async ({ joinAs }) => {
 test('unknown addresses go to the home page', async ({ page }) => {
   for (const path of ['/foo', '/play/', '/play']) {
     await page.goto(path)
-    await expect(page.locator('.room-code-input')).toBeVisible()
+    await expect(roomCodeInput(page)).toBeVisible()
     expect(new URL(page.url()).pathname).toBe('/')
   }
 })
@@ -418,7 +500,7 @@ test('unknown addresses go to the home page', async ({ page }) => {
 test('create game opens a new room with a readable code', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByText(/^Joining as player\d+\./)).toBeVisible()
-  await page.click('input[value="Create Game"]')
+  await page.getByRole('button', { name: 'Create Game' }).click()
   await page.waitForURL(/\/play\/[a-km-np-z2-9]{5}$/)
   await expect(turtles(page)).toHaveCount(1)
 })
@@ -426,19 +508,20 @@ test('create game opens a new room with a readable code', async ({ page }) => {
 test('invalid room code shows an error', async ({ page }) => {
   await page.goto(`/play/${encodeURIComponent('bad room!')}`)
   await expect(message(page)).toHaveText('invalid room id')
+  await expect(page.getByText('Check the code with your friend, or start a new room.')).toBeVisible()
   await expect(startButton(page)).toHaveCount(0)
-  await page.getByRole('link', { name: 'Back to the home page' }).click()
-  await expect(page.locator('.room-code-input')).toBeVisible()
+  await page.getByRole('link', { name: 'Back to home' }).click()
+  await expect(roomCodeInput(page)).toBeVisible()
 })
 
 test('only the game page connects to the server', async ({ page }) => {
   const websockets = []
   page.on('websocket', (ws) => websockets.push(ws))
   await page.goto('/')
-  await expect(page.locator('.room-code-input')).toBeVisible()
+  await expect(roomCodeInput(page)).toBeVisible()
   await page.waitForTimeout(500)
   expect(websockets).toHaveLength(0)
-  await page.click('input[value="Create Game"]')
+  await page.getByRole('button', { name: 'Create Game' }).click()
   await expect(turtles(page)).toHaveCount(1)
   expect(websockets).toHaveLength(1)
   // back home closes the connection
