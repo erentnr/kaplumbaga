@@ -19,7 +19,8 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: `${python} -m gunicorn --worker-class gthread --workers 1 --threads 100 `
+      // same thread count as the Dockerfile, game.py keeps MAX_SOCKETS below it
+      command: `${python} -m gunicorn --worker-class gthread --workers 1 --threads 300 `
         + '--bind 127.0.0.1:8000 --no-control-socket game:app',
       cwd: '../server',
       url: 'http://127.0.0.1:8000/healthz',

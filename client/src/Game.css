@@ -6,7 +6,10 @@
 .kaplumbaga-race {
   position: relative;
   background-color: #5D8AA6;
-  height:350px;
+  /* grows when the players need more room */
+  min-height: 350px;
+  padding: 10px 0;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   justify-content: space-around;
@@ -15,9 +18,39 @@
   margin-bottom: 10px;
 }
 
+/* one lane per player, the name and the turtle move inside it */
 .kaplumbaga-wrapper {
+  width: 100%;
+}
+
+.kaplumbaga-wrapper p,
+.kaplumbaga-wrapper .kaplumbaga {
   position: relative;
-  transition: 0.5s;
+  display: block;
+  transition: left 0.5s, transform 0.5s;
+}
+
+.kaplumbaga-wrapper p {
+  display: flex;
+  margin: 0 0 4px;
+  width: fit-content;
+  max-width: 50%;
+  white-space: pre;
+}
+
+/* a long name is shortened, the "(you)" marker after it stays whole */
+.kaplumbaga-wrapper .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kaplumbaga-wrapper.me .name {
+  font-weight: 800;
+}
+
+.kaplumbaga-wrapper.me p::after {
+  content: " (you)";
+  flex-shrink: 0;
 }
 
 .kaplumbaga {

@@ -27,9 +27,21 @@ if ! git merge-base --is-ancestor "$sha" origin/main; then
   echo "$sha is not on main" >&2
   exit 1
 fi
+running=$(git rev-parse HEAD)
+
+up() {
+  docker compose up --detach --build --remove-orphans --wait --wait-timeout 120
+}
+
 # .env is untracked and ignored, reset keeps it
 git reset --hard --quiet "$sha"
-
-docker compose up --detach --build --remove-orphans --wait --wait-timeout 120
+if ! up; then
+  # Compose may have replaced the running container already. Its image is
+  # still in the build cache until the prune below, going back is quick.
+  echo "$sha is not healthy, going back to $running" >&2
+  git reset --hard --quiet "$running"
+  up || echo "$running is not healthy either" >&2
+  exit 1
+fi
 docker image prune --force > /dev/null
 echo "deployed $sha"
