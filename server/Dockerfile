@@ -1,5 +1,7 @@
 # all dependencies are pure Python, so the small musl based image works
 FROM python:3.14-alpine
+# links the image on ghcr.io to the repository, the VPS prunes old images by it
+LABEL org.opencontainers.image.source="https://github.com/erentnr/kaplumbaga"
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app

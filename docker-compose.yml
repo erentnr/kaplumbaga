@@ -2,7 +2,7 @@
 # an outbound tunnel and Cloudflare routes kaplumbaga-api.eren.sh to server:8000.
 #
 #   cp .env-sample .env   # paste the tunnel token
-#   docker compose up -d --build
+#   kaplumbaga-deploy <commit>   # see deploy/vps-deploy.sh
 
 x-logging: &logging
   driver: json-file
@@ -12,6 +12,9 @@ x-logging: &logging
 
 services:
   server:
+    # CI pushes an image for every commit on main, kaplumbaga-deploy sets
+    # SERVER_TAG to the commit it deploys. Without it compose builds here.
+    image: ghcr.io/erentnr/kaplumbaga-server:${SERVER_TAG:-local}
     build: ./server
     restart: unless-stopped
     environment:

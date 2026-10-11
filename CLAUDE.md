@@ -14,7 +14,7 @@ python game.py                              # dev server on :5001, debug mode
 pytest -q                                   # all server tests
 pytest test_game.py::test_full_game_flow    # one test
 pytest -k language                          # tests matching a name
-docker build -t kaplumbaga-server .         # production image, CI builds it too
+docker build -t kaplumbaga-server .         # production image, CI builds the deployed one
 ```
 
 Client (`cd client`, Node 22+):
@@ -71,9 +71,9 @@ The texts live in `TEXTS` in `game.py`. Language codes must also be added to `LA
 
 ## Deployment
 
-`main` is protected (PRs only, squash merge, required checks). The CI workflow in `.github/workflows/ci.yml` runs server tests plus the Docker build, client lint plus build, then the e2e tests. On a push to `main` it then deploys:
+`main` is protected (PRs only, squash merge, required checks). The CI workflow in `.github/workflows/ci.yml` runs the server tests, client lint plus build, then the e2e tests. The `image` job builds the server image and checks that it starts and answers `/healthz`. On a push to `main`, that job pushes the image as `ghcr.io/erentnr/kaplumbaga-server:<commit sha>`, and the workflow then deploys:
 
-1. **Server**: CI connects over SSH with a key whose forced command is `/usr/local/bin/kaplumbaga-deploy` on the VPS. That file is a *copy* of `deploy/vps-deploy.sh`, so changes to the script in the repo only take effect once it is copied to the VPS again. The script deploys a commit SHA only if it is on `main`, runs `docker compose up --wait`, and rolls back to the previous commit if the new one is unhealthy. `docker-compose.yml` publishes no ports; `cloudflared` tunnels `kaplumbaga-api.eren.sh` to `server:8000`. Health check: `/healthz`.
+1. **Server**: CI connects over SSH with a key whose forced command is `/usr/local/bin/kaplumbaga-deploy` on the VPS, a copy of `deploy/vps-deploy.sh`. The script deploys a commit SHA only if it is on `main`. It checks out that commit (for `docker-compose.yml`), pulls the commit's image with `SERVER_TAG=<sha>` and runs `docker compose up --no-build --wait`. If the new server isn't healthy, it goes back to the previous commit's image, which ghcr.io still has. After a successful deploy it installs its own new version over the copy, so script changes deploy too. The VPS never builds images; without `SERVER_TAG`, compose builds one locally tagged `local`. `docker-compose.yml` publishes no ports; `cloudflared` tunnels `kaplumbaga-api.eren.sh` to `server:8000`. Health check: `/healthz`.
 2. **Client**: after the server, `npm run deploy` (`vite build && wrangler deploy`) uploads static assets to Cloudflare (no Worker script). The custom domain is attached outside `wrangler.jsonc` on purpose, so don't add `routes` there.
 
 Actions are pinned to commit SHAs, npm always runs with `--ignore-scripts`, and Dependabot opens grouped weekly updates with a 7-day cooldown.
