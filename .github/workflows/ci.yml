@@ -136,8 +136,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: production
+    outputs:
+      latest: ${{ steps.latest.outputs.latest }}
     steps:
+      # Queued runs on main don't always run in commit order, so an older
+      # commit's run can come last. Only the newest commit deploys; when main
+      # has moved on, that commit's run deploys instead of this one.
+      - name: Check this is the newest commit on main
+        id: latest
+        run: |
+          main=$(git ls-remote --exit-code "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" refs/heads/main)
+          main=${main%%[[:space:]]*}
+          if [ "$main" = "$GITHUB_SHA" ]; then
+            echo latest=true >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::main is at $main now, so its run deploys instead"
+            echo latest=false >> "$GITHUB_OUTPUT"
+          fi
       - name: Deploy to the VPS
+        if: steps.latest.outputs.latest == 'true'
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
@@ -151,12 +168,14 @@ jobs:
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@$VPS_HOST" "$GITHUB_SHA"
           rm -f ~/.ssh/deploy_key
       - name: Check the server
+        if: steps.latest.outputs.latest == 'true'
         run: curl --fail --silent --show-error --retry 5 --retry-all-errors https://kaplumbaga-api.eren.sh/healthz
 
   # Deploys after the server, so the new client never talks to an old server.
   deploy-client:
     name: Deploy client
     needs: [deploy-server]
+    if: needs.deploy-server.outputs.latest == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: production
